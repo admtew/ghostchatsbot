@@ -1,6 +1,6 @@
 """
 Ghost Recovery Bot
-ââââââââââââââââââ
+------------------
 Recovers messages your contacts delete from your Telegram Business chats,
 and rescues self-destruct media by replying to it or reacting.
 
@@ -31,20 +31,20 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 
-# âââââââââââââââââââââââââ Config âââââââââââââââââââââââââ
+# ========================= Config =========================
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN Ð½Ðµ Ð·Ð°Ð´Ð°Ð½ Ð² .env")
+    raise RuntimeError("BOT_TOKEN не задан в .env")
 
 DB_PATH = os.getenv("DB_PATH", "data.db")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # ÐµÑÐ»Ð¸ Ð·Ð°Ð´Ð°Ð½ â webhook-ÑÐµÐ¶Ð¸Ð¼
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # если задан — webhook-режим
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8080"))
 
-# ÐÐ¸Ð¼Ð¸Ñ: Ð¼Ð°ÐºÑÐ¸Ð¼ÑÐ¼ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¹ Ð² Ð¾Ð´Ð½Ð¾Ð¼ ÑÐ²ÐµÐ´Ð¾Ð¼Ð»ÐµÐ½Ð¸Ð¸ Ð¾Ð± ÑÐ´Ð°Ð»ÐµÐ½Ð¸Ð¸
+# Лимит: максимум сообщений в одном уведомлении об удалении
 BATCH_DISPLAY_LIMIT = 30
 
 logging.basicConfig(
@@ -59,7 +59,7 @@ router = Router(name="ghost")
 dp.include_router(router)
 
 
-# âââââââââââââââââââââââââ Storage âââââââââââââââââââââââââ
+# ========================= Storage =========================
 
 _db: sqlite3.Connection | None = None
 
@@ -113,7 +113,7 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# âââââââââââââââââââââââââ Helpers âââââââââââââââââââââââââ
+# ========================= Helpers =========================
 
 def save_connection(bc: BusinessConnection) -> None:
     get_db().execute(
@@ -170,9 +170,9 @@ def _classify(msg: Message) -> tuple[str, str | None, dict]:
 def _display_name(msg: Message) -> str:
     u = msg.from_user
     if not u:
-        return "ÐÐµÐ¸Ð·Ð²ÐµÑÑÐ½ÑÐ¹"
+        return "Неизвестный"
     parts = [p for p in (u.first_name, u.last_name) if p]
-    name = " ".join(parts) or "ÐÐµÐ· Ð¸Ð¼ÐµÐ½Ð¸"
+    name = " ".join(parts) or "Без имени"
     if u.username:
         name = f"{name} (@{u.username})"
     return name
@@ -253,12 +253,12 @@ def recall_batch(conn_id: str, chat_id: int, message_ids: list[int]) -> list[tup
     return result
 
 
-# âââââââââââââââââââââââââ Resending âââââââââââââââââââââââââ
+# ========================= Resending =========================
 
 async def _send_one(owner: int, item: dict, header: str) -> None:
     """Send a single cached message to the owner."""
-    name = _safe(item.get("sender_name") or "ÐÐµÐ¸Ð·Ð²ÐµÑÑÐ½ÑÐ¹")
-    info = f"{header}\n<b>ÐÑ:</b> {name}"
+    name = _safe(item.get("sender_name") or "Неизвестный")
+    info = f"{header}\n<b>От:</b> {name}"
     cap = _safe(item.get("caption"))
     body = f"{info}\n\n{cap}" if cap else info
     fid = item.get("file_id")
@@ -290,8 +290,8 @@ async def _send_one(owner: int, item: dict, header: str) -> None:
             extra = item.get("extra", {})
             await bot.send_message(
                 owner,
-                f"{info}\n\n<b>ÐÐ¾Ð½ÑÐ°ÐºÑ:</b> {_safe(extra.get('name', ''))}\n"
-                f"<b>Ð¢ÐµÐ»ÐµÑÐ¾Ð½:</b> {_safe(extra.get('phone', ''))}",
+                f"{info}\n\n<b>Контакт:</b> {_safe(extra.get('name', ''))}\n"
+                f"<b>Телефон:</b> {_safe(extra.get('phone', ''))}",
             )
         elif kind == "location":
             extra = item.get("extra", {})
@@ -303,7 +303,7 @@ async def _send_one(owner: int, item: dict, header: str) -> None:
         log.warning("resend failed for %s: %s", kind, e)
         await bot.send_message(
             owner,
-            f"{info}\n\n<i>ÐÐµ ÑÐ´Ð°Ð»Ð¾ÑÑ Ð¿ÐµÑÐµÑÐ»Ð°ÑÑ ({e.__class__.__name__}).</i>",
+            f"{info}\n\n<i>Не удалось переслать ({e.__class__.__name__}).</i>",
         )
 
 
@@ -314,32 +314,29 @@ async def forward_deleted_batch(
 ) -> None:
     """Send a batch of deleted messages to the owner with a single header."""
     count = len(items)
-    chat_info = f" Ð² ÑÐ°ÑÐµ <b>{_safe(chat_title)}</b>" if chat_title else ""
+    chat_info = f" в чате <b>{_safe(chat_title)}</b>" if chat_title else ""
 
     if count == 1:
-        # ÐÐ´Ð½Ð¾ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ðµ â ÐºÐ°Ðº ÑÐ°Ð½ÑÑÐµ, ÐºÐ¾Ð¼Ð¿Ð°ÐºÑÐ½Ð¾
         _, item = items[0]
-        await _send_one(owner, item, "ð <b>Ð£Ð´Ð°Ð»ÑÐ½Ð½Ð¾Ðµ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ðµ</b>")
+        await _send_one(owner, item, "\U0001f5d1 <b>Удалённое сообщение</b>")
         return
 
-    # ÐÐµÑÐºÐ¾Ð»ÑÐºÐ¾ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¹ â ÑÐ½Ð°ÑÐ°Ð»Ð° Ð·Ð°Ð³Ð¾Ð»Ð¾Ð²Ð¾Ðº, Ð¿Ð¾ÑÐ¾Ð¼ ÐºÐ°Ð¶Ð´Ð¾Ðµ
     header_text = (
-        f"ð <b>Ð£Ð´Ð°Ð»ÐµÐ½Ð¾ {count} ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¹</b>{chat_info}\n"
-        f"{'â' * 20}"
+        f"\U0001f5d1 <b>Удалено {count} сообщений</b>{chat_info}\n"
+        f"{'─' * 20}"
     )
     await bot.send_message(owner, header_text)
 
     for i, (mid, item) in enumerate(items[:BATCH_DISPLAY_LIMIT], 1):
         await _send_one(owner, item, f"<b>[{i}/{count}]</b>")
-        # ÐÐµÐ±Ð¾Ð»ÑÑÐ°Ñ Ð·Ð°Ð´ÐµÑÐ¶ÐºÐ° ÑÑÐ¾Ð±Ñ Ð½Ðµ ÑÐ»Ð¾Ð²Ð¸ÑÑ rate limit Ð¾Ñ Telegram
         if i % 5 == 0:
             await asyncio.sleep(0.5)
 
     if count > BATCH_DISPLAY_LIMIT:
         await bot.send_message(
             owner,
-            f"<i>...Ð¸ ÐµÑÑ {count - BATCH_DISPLAY_LIMIT} ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¹ "
-            f"(Ð¿Ð¾ÐºÐ°Ð·Ð°Ð½Ñ Ð¿ÐµÑÐ²ÑÐµ {BATCH_DISPLAY_LIMIT}).</i>",
+            f"<i>...и ещё {count - BATCH_DISPLAY_LIMIT} сообщений "
+            f"(показаны первые {BATCH_DISPLAY_LIMIT}).</i>",
         )
 
 
@@ -348,7 +345,7 @@ async def forward_cached(owner: int, item: dict, header: str) -> None:
     await _send_one(owner, item, header)
 
 
-# âââââââââââââââââââââââââ Business handlers âââââââââââââââââââââââââ
+# ========================= Business handlers =========================
 
 @router.business_connection()
 async def on_connect(bc: BusinessConnection) -> None:
@@ -357,17 +354,17 @@ async def on_connect(bc: BusinessConnection) -> None:
         if bc.is_enabled:
             await bot.send_message(
                 bc.user.id,
-                "â <b>ÐÐ¾Ñ Ð¿Ð¾Ð´ÐºÐ»ÑÑÑÐ½</b>\n\n"
-                "Ð¯ ÑÐ¸ÑÐ¾ ÑÐ¾ÑÑÐ°Ð½ÑÑ Ð²ÑÐ¾Ð´ÑÑÐ¸Ðµ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ñ Ð¸ Ð¿ÑÐ¸ÑÐ»Ñ Ð²ÑÑ, "
-                "ÑÑÐ¾ ÑÐ¾Ð±ÐµÑÐµÐ´Ð½Ð¸Ðº ÑÐ´Ð°Ð»Ð¸Ñ â Ð´Ð°Ð¶Ðµ ÐµÑÐ»Ð¸ ÑÐ´Ð°Ð»Ð¸Ñ ÑÑÐ°Ð·Ñ Ð¿Ð°ÑÐºÑ.\n\n"
-                "ð¸ <b>Ð¡Ð¾Ð¾Ð±ÑÐµÐ½Ð¸Ñ Ñ ÑÐ°Ð¹Ð¼ÐµÑÐ¾Ð¼</b> â Ð¾ÑÐ²ÐµÑÑ Ð½Ð° ÑÐ°ÐºÐ¾Ðµ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ðµ "
-                "Ð»ÑÐ±ÑÐ¼ ÑÐ¸Ð¼Ð²Ð¾Ð»Ð¾Ð¼ Ð¸Ð»Ð¸ Ð¿Ð¾ÑÑÐ°Ð²Ñ ÑÐµÐ°ÐºÑÐ¸Ñ, Ñ Ð¿ÑÐ¸ÑÐ»Ñ ÐºÐ¾Ð¿Ð¸Ñ.\n\n"
-                "ð ÐÐ°Ð½Ð½ÑÐµ ÑÑÐ°Ð½ÑÑÑÑ ÑÐ¾Ð»ÑÐºÐ¾ Ð½Ð° ÑÐ²Ð¾ÑÐ¼ ÑÐµÑÐ²ÐµÑÐµ.\n\n"
-                "/help â ÑÐ¿ÑÐ°Ð²ÐºÐ° â¢ /status â ÑÑÐ°ÑÑÑ â¢ /wipe â Ð¾ÑÐ¸ÑÑÐ¸ÑÑ ÐºÑÑ",
+                "\u2705 <b>Бот подключён</b>\n\n"
+                "Я тихо сохраняю входящие сообщения и пришлю всё, "
+                "что собеседник удалит — даже если удалит сразу пачку.\n\n"
+                "\U0001f4f8 <b>Сообщения с таймером</b> — ответь на такое сообщение "
+                "любым символом или поставь реакцию, я пришлю копию.\n\n"
+                "\U0001f512 Данные хранятся только на своём сервере.\n\n"
+                "/help — справка \u2022 /status — статус \u2022 /wipe — очистить кэш",
             )
         else:
             await bot.send_message(
-                bc.user.id, "ð ÐÐ¾Ñ Ð¾ÑÐºÐ»ÑÑÑÐ½, Ð¾ÑÑÐ»ÐµÐ¶Ð¸Ð²Ð°Ð½Ð¸Ðµ Ð¾ÑÑÐ°Ð½Ð¾Ð²Ð»ÐµÐ½Ð¾."
+                bc.user.id, "\U0001f6d1 Бот отключён, отслеживание остановлено."
             )
     except Exception as e:
         log.warning("notify on connect failed: %s", e)
@@ -377,7 +374,7 @@ async def on_connect(bc: BusinessConnection) -> None:
 async def on_business_message(msg: Message) -> None:
     remember(msg)
 
-    # Self-destruct rescue: owner replies â resend the cached original
+    # Self-destruct rescue: owner replies — resend the cached original
     owner = owner_of(msg.business_connection_id or "")
     if (
         owner
@@ -388,7 +385,7 @@ async def on_business_message(msg: Message) -> None:
         r = msg.reply_to_message
         cached = recall(msg.business_connection_id, r.chat.id, r.message_id)
         if cached:
-            await forward_cached(owner, cached, "ð¸ <b>Ð¡Ð¾ÑÑÐ°Ð½ÐµÐ½Ð¾</b>")
+            await forward_cached(owner, cached, "\U0001f4f8 <b>Сохранено</b>")
 
 
 @router.edited_business_message()
@@ -406,7 +403,6 @@ async def on_deleted(event: BusinessMessagesDeleted) -> None:
     if not owner:
         return
 
-    # ÐÐ°ÑÑÐµÐ²ÑÐ¹ Ð·Ð°Ð¿ÑÐ¾Ñ â Ð¾Ð´Ð¸Ð½ SQL Ð²Ð¼ÐµÑÑÐ¾ N
     items = recall_batch(
         event.business_connection_id,
         event.chat.id,
@@ -414,7 +410,6 @@ async def on_deleted(event: BusinessMessagesDeleted) -> None:
     )
 
     if not items:
-        # Ð¡Ð¾Ð¾Ð±ÑÐµÐ½Ð¸Ñ Ð½Ðµ Ð±ÑÐ»Ð¸ Ð² ÐºÑÑÐµ â ÑÐ²ÐµÐ´Ð¾Ð¼Ð»ÑÐµÐ¼ ÑÑÐ¾ ÑÑÐ¾-ÑÐ¾ ÑÐ´Ð°Ð»Ð¸Ð»Ð¸ Ð½Ð¾ Ð¼Ñ Ð½Ðµ ÑÑÐ¿ÐµÐ»Ð¸ ÑÐ¾ÑÑÐ°Ð½Ð¸ÑÑ
         count = len(event.message_ids)
         chat_name = ""
         if event.chat:
@@ -423,12 +418,11 @@ async def on_deleted(event: BusinessMessagesDeleted) -> None:
             chat_name = f" ({_safe(fn)} {_safe(ln)}".strip() + ")"
         await bot.send_message(
             owner,
-            f"ð Ð£Ð´Ð°Ð»ÐµÐ½Ð¾ <b>{count}</b> ÑÐ¾Ð¾Ð±Ñ.{chat_name}, "
-            f"Ð½Ð¾ Ð¾Ð½Ð¸ Ð½Ðµ Ð±ÑÐ»Ð¸ Ð² ÐºÑÑÐµ (Ð±Ð¾Ñ Ð¼Ð¾Ð³ Ð±ÑÑÑ Ð²ÑÐºÐ»ÑÑÐµÐ½).",
+            f"\U0001f5d1 Удалено <b>{count}</b> сообщ.{chat_name}, "
+            f"но они не были в кэше (бот мог быть выключен).",
         )
         return
 
-    # ÐÐ¿ÑÐµÐ´ÐµÐ»ÑÐµÐ¼ Ð½Ð°Ð·Ð²Ð°Ð½Ð¸Ðµ ÑÐ°ÑÐ° Ð´Ð»Ñ Ð·Ð°Ð³Ð¾Ð»Ð¾Ð²ÐºÐ°
     chat_title = None
     if event.chat:
         parts = [event.chat.first_name, event.chat.last_name]
@@ -436,13 +430,12 @@ async def on_deleted(event: BusinessMessagesDeleted) -> None:
 
     await forward_deleted_batch(owner, items, chat_title)
 
-    # Ð£Ð²ÐµÐ´Ð¾Ð¼Ð»ÑÐµÐ¼ ÐµÑÐ»Ð¸ ÑÐ°ÑÑÑ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¹ Ð½Ðµ Ð±ÑÐ»Ð° Ð² ÐºÑÑÐµ
     found_ids = {m_id for m_id, _ in items}
     missing = [m_id for m_id in event.message_ids if m_id not in found_ids]
     if missing:
         await bot.send_message(
             owner,
-            f"<i>ÐÑÑ {len(missing)} ÑÐ´Ð°Ð». ÑÐ¾Ð¾Ð±Ñ. Ð½Ðµ Ð±ÑÐ»Ð¸ Ð² ÐºÑÑÐµ.</i>",
+            f"<i>Ещё {len(missing)} удал. сообщ. не были в кэше.</i>",
         )
 
 
@@ -488,43 +481,43 @@ async def on_reaction(event: MessageReactionUpdated) -> None:
         }
 
     if cached:
-        await forward_cached(owner, cached, "â¤ï¸ <b>Ð¡Ð¾ÑÑÐ°Ð½ÐµÐ½Ð¾ Ð¿Ð¾ ÑÐµÐ°ÐºÑÐ¸Ð¸</b>")
+        await forward_cached(owner, cached, "\u2764\ufe0f <b>Сохранено по реакции</b>")
 
 
-# âââââââââââââââââââââââââ Private chat commands âââââââââââââââââââââââââ
+# ========================= Private chat commands =========================
 
 @router.message(CommandStart())
 async def cmd_start(msg: Message) -> None:
     await msg.answer(
-        "ð» <b>Ghost Recovery Bot</b>\n\n"
-        "Ð¯ Ð¿ÐµÑÐµÑÐ²Ð°ÑÑÐ²Ð°Ñ Ð¸ ÑÐ¾ÑÑÐ°Ð½ÑÑ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ñ Ð¸Ð· ÑÐ²Ð¾Ð¸Ñ Ð±Ð¸Ð·Ð½ÐµÑ-ÑÐ°ÑÐ¾Ð². "
-        "ÐÑÐ»Ð¸ ÑÐ¾Ð±ÐµÑÐµÐ´Ð½Ð¸Ðº ÑÐ´Ð°Ð»Ð¸Ñ ÑÑÐ¾-ÑÐ¾ â ÑÑ Ð¿Ð¾Ð»ÑÑÐ¸ÑÑ ÐºÐ¾Ð¿Ð¸Ñ.\n\n"
-        "ÐÑÐ¿ÑÐ°Ð²Ñ /help ÑÑÐ¾Ð±Ñ ÑÐ·Ð½Ð°ÑÑ ÐºÐ°Ðº Ð¿Ð¾Ð´ÐºÐ»ÑÑÐ¸ÑÑ."
+        "\U0001f47b <b>Ghost Recovery Bot</b>\n\n"
+        "Я перехватываю и сохраняю сообщения из твоих бизнес-чатов. "
+        "Если собеседник удалит что-то — ты получишь копию.\n\n"
+        "Отправь /help чтобы узнать как подключить."
     )
 
 
 @router.message(Command("help"))
 async def cmd_help(msg: Message) -> None:
     await msg.answer(
-        "ð <b>ÐÐ°Ðº ÑÐ°Ð±Ð¾ÑÐ°ÐµÑ Ghost Recovery Bot</b>\n\n"
-        "<b>ÐÐ¾Ð´ÐºÐ»ÑÑÐµÐ½Ð¸Ðµ:</b>\n"
-        "1. ÐÑÐºÑÐ¾Ð¹ Telegram â <b>ÐÐ°ÑÑÑÐ¾Ð¹ÐºÐ¸</b> â <b>Telegram Business</b>\n"
-        "2. Ð Ð°Ð·Ð´ÐµÐ» <b>Ð§Ð°Ñ-Ð±Ð¾ÑÑ</b> â Ð²Ð²ÐµÐ´Ð¸ ÑÐ·ÐµÑÐ½ÐµÐ¹Ð¼ ÑÑÐ¾Ð³Ð¾ Ð±Ð¾ÑÐ°\n"
-        "3. ÐÐ¾Ð´ÐºÐ»ÑÑÐ¸ Ð¸ Ð´Ð°Ð¹ ÑÐ°Ð·ÑÐµÑÐµÐ½Ð¸Ñ Ð½Ð° ÑÑÐµÐ½Ð¸Ðµ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¹\n\n"
-        "<b>Ð§ÑÐ¾ Ð´ÐµÐ»Ð°ÐµÑ Ð±Ð¾Ñ:</b>\n"
-        "â¢ Ð¢Ð¸ÑÐ¾ ÑÐ¾ÑÑÐ°Ð½ÑÐµÑ Ð²ÑÐµ Ð²ÑÐ¾Ð´ÑÑÐ¸Ðµ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ñ Ð² Ð±Ð¸Ð·Ð½ÐµÑ-ÑÐ°ÑÐ°Ñ\n"
-        "â¢ ÐÑÐ»Ð¸ ÑÐ¾Ð±ÐµÑÐµÐ´Ð½Ð¸Ðº ÑÐ´Ð°Ð»Ð¸Ñ 1 Ð¸Ð»Ð¸ 50 ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¹ â ÑÑ Ð¿Ð¾Ð»ÑÑÐ¸ÑÑ Ð¸Ñ Ð²ÑÐµ\n"
-        "â¢ Ð¢ÐµÐºÑÑ, ÑÐ¾ÑÐ¾, Ð²Ð¸Ð´ÐµÐ¾, Ð³Ð¾Ð»Ð¾ÑÐ¾Ð²ÑÐµ, Ð´Ð¾ÐºÑÐ¼ÐµÐ½ÑÑ, ÑÑÐ¸ÐºÐµÑÑ â Ð²ÑÑ ÑÐ¾ÑÑÐ°Ð½ÑÐµÑÑÑ\n\n"
-        "ð¸ <b>Ð¡Ð¾Ð¾Ð±ÑÐµÐ½Ð¸Ñ Ñ ÑÐ°Ð¹Ð¼ÐµÑÐ¾Ð¼:</b>\n"
-        "ÐÑÐ²ÐµÑÑ Ð½Ð° ÑÐ°ÐºÐ¾Ðµ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ðµ Ð»ÑÐ±ÑÐ¼ ÑÐ¸Ð¼Ð²Ð¾Ð»Ð¾Ð¼ Ð¸Ð»Ð¸ Ð¿Ð¾ÑÑÐ°Ð²Ñ ÑÐµÐ°ÐºÑÐ¸Ñ â "
-        "Ð±Ð¾Ñ Ð¿ÑÐ¸ÑÐ»ÑÑ ÑÐµÐ±Ðµ ÐºÐ¾Ð¿Ð¸Ñ Ð´Ð¾ ÑÐ¾Ð³Ð¾ ÐºÐ°Ðº Ð¾Ð½Ð¾ Ð¸ÑÑÐµÐ·Ð½ÐµÑ.\n\n"
-        "<b>ÐÐ¾Ð¼Ð°Ð½Ð´Ñ:</b>\n"
-        "/start â Ð¿ÑÐ¸Ð²ÐµÑÑÑÐ²Ð¸Ðµ\n"
-        "/help â ÑÑÐ° ÑÐ¿ÑÐ°Ð²ÐºÐ°\n"
-        "/status â ÑÑÐ°ÑÑÑ Ð¿Ð¾Ð´ÐºÐ»ÑÑÐµÐ½Ð¸Ñ Ð¸ ÐºÑÑÐ°\n"
-        "/wipe â Ð¿Ð¾Ð»Ð½Ð¾ÑÑÑÑ Ð¾ÑÐ¸ÑÑÐ¸ÑÑ ÑÐ¾ÑÑÐ°Ð½ÑÐ½Ð½ÑÐµ Ð´Ð°Ð½Ð½ÑÐµ\n\n"
-        "ð ÐÑÐµ Ð´Ð°Ð½Ð½ÑÐµ ÑÑÐ°Ð½ÑÑÑÑ ÑÐ¾Ð»ÑÐºÐ¾ Ð½Ð° ÑÐ²Ð¾ÑÐ¼ ÑÐµÑÐ²ÐµÑÐµ. "
-        "ÐÐ¾Ñ Ð½Ðµ Ð¿ÐµÑÐµÐ´Ð°ÑÑ Ð¸Ñ ÑÑÐµÑÑÐ¸Ð¼ Ð»Ð¸ÑÐ°Ð¼."
+        "\U0001f4d6 <b>Как работает Ghost Recovery Bot</b>\n\n"
+        "<b>Подключение:</b>\n"
+        "1. Открой Telegram \u2192 <b>Настройки</b> \u2192 <b>Telegram Business</b>\n"
+        "2. Раздел <b>Чат-боты</b> \u2192 введи юзернейм этого бота\n"
+        "3. Подключи и дай разрешения на чтение сообщений\n\n"
+        "<b>Что делает бот:</b>\n"
+        "\u2022 Тихо сохраняет все входящие сообщения в бизнес-чатах\n"
+        "\u2022 Если собеседник удалит 1 или 50 сообщений — ты получишь их все\n"
+        "\u2022 Текст, фото, видео, голосовые, документы, стикеры — всё сохраняется\n\n"
+        "\U0001f4f8 <b>Сообщения с таймером:</b>\n"
+        "Ответь на такое сообщение любым символом или поставь реакцию — "
+        "бот пришлёт тебе копию до того как оно исчезнет.\n\n"
+        "<b>Команды:</b>\n"
+        "/start — приветствие\n"
+        "/help — эта справка\n"
+        "/status — статус подключения и кэша\n"
+        "/wipe — полностью очистить сохранённые данные\n\n"
+        "\U0001f512 Все данные хранятся только на своём сервере. "
+        "Бот не передаёт их третьим лицам."
     )
 
 
@@ -541,11 +534,11 @@ async def cmd_status(msg: Message) -> None:
             WHERE conn_id IN (SELECT id FROM connections WHERE owner_id=?)""",
         (uid,),
     ).fetchone()[0]
-    line = "â ÐÐ¾Ð´ÐºÐ»ÑÑÐµÐ½Ð¾" if connected else "â ÐÐµ Ð¿Ð¾Ð´ÐºÐ»ÑÑÐµÐ½Ð¾"
+    line = "\u2705 Подключено" if connected else "\u274c Не подключено"
     await msg.answer(
-        f"<b>Ð¡ÑÐ°ÑÑÑ:</b> {line}\n"
-        f"<b>ÐÐºÑÐ¸Ð²Ð½ÑÑ Ð¿Ð¾Ð´ÐºÐ»ÑÑÐµÐ½Ð¸Ð¹:</b> {connected}\n"
-        f"<b>Ð¡Ð¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¹ Ð² ÐºÑÑÐµ:</b> {cached}"
+        f"<b>Статус:</b> {line}\n"
+        f"<b>Активных подключений:</b> {connected}\n"
+        f"<b>Сообщений в кэше:</b> {cached}"
     )
 
 
@@ -558,10 +551,10 @@ async def cmd_wipe(msg: Message) -> None:
             WHERE conn_id IN (SELECT id FROM connections WHERE owner_id=?)""",
         (uid,),
     )
-    await msg.answer(f"ð§¹ ÐÑÑ Ð¾ÑÐ¸ÑÐµÐ½. Ð£Ð´Ð°Ð»ÐµÐ½Ð¾ Ð·Ð°Ð¿Ð¸ÑÐµÐ¹: {result.rowcount}")
+    await msg.answer(f"\U0001f9f9 Кэш очищен. Удалено записей: {result.rowcount}")
 
 
-# âââââââââââââââââââââââââ Entry âââââââââââââââââââââââââ
+# ========================= Entry =========================
 
 ALLOWED_UPDATES = [
     "message",
@@ -622,6 +615,7 @@ async def main() -> None:
 
         await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)
+
 
 if __name__ == "__main__":
     try:
