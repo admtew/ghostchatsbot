@@ -234,7 +234,7 @@ def recall_batch(conn_id: str, chat_id: int, message_ids: list[int]) -> list[tup
     db = get_db()
     placeholders = ",".join("?" for _ in message_ids)
     rows = db.execute(
-        f"""SELECT message_id, sender_name, kind, text, caption, file_id, extra
+        f"""SELECT message_id, sender_id, sender_name, kind, text, caption, file_id, extra
               FROM messages
              WHERE conn_id=? AND chat_id=? AND message_id IN ({placeholders})
              ORDER BY message_id ASC""",
@@ -243,12 +243,13 @@ def recall_batch(conn_id: str, chat_id: int, message_ids: list[int]) -> list[tup
     result = []
     for r in rows:
         result.append((r[0], {
-            "sender_name": r[1],
-            "kind": r[2],
-            "text": r[3],
-            "caption": r[4],
-            "file_id": r[5],
-            "extra": json.loads(r[6]) if r[6] else {},
+            "sender_id": r[1],
+            "sender_name": r[2],
+            "kind": r[3],
+            "text": r[4],
+            "caption": r[5],
+            "file_id": r[6],
+            "extra": json.loads(r[7]) if r[7] else {},
         }))
     return result
 
@@ -403,24 +404,16 @@ async def on_deleted(event: BusinessMessagesDeleted) -> None:
     if not owner:
         return
 
-    items = recall_batch(
+    all_items = recall_batch(
         event.business_connection_id,
         event.chat.id,
         list(event.message_ids),
     )
 
+    # Только сообщения от собеседника (не от владельца)
+    items = [(mid, data) for mid, data in all_items if data.get("sender_id") != owner]
+
     if not items:
-        count = len(event.message_ids)
-        chat_name = ""
-        if event.chat:
-            fn = event.chat.first_name or ""
-            ln = event.chat.last_name or ""
-            chat_name = f" ({_safe(fn)} {_safe(ln)}".strip() + ")"
-        await bot.send_message(
-            owner,
-            f"\U0001f5d1 Удалено <b>{count}</b> сообщ.{chat_name}, "
-            f"но они не были в кэше (бот мог быть выключен).",
-        )
         return
 
     chat_title = None
