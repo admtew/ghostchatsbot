@@ -531,47 +531,28 @@ async def on_deleted(event: BusinessMessagesDeleted) -> None:
 @router.message_reaction()
 async def on_reaction(event: MessageReactionUpdated) -> None:
     """Rescue self-destruct media when the owner adds a reaction."""
-    log.info(
-        "message_reaction: chat=%s msg=%s user=%s new=%s old=%s bc_id=%s",
-        event.chat.id, event.message_id,
-        event.user.id if event.user else None,
-        len(event.new_reaction) if event.new_reaction else 0,
-        len(event.old_reaction) if event.old_reaction else 0,
-        getattr(event, "business_connection_id", None),
-    )
-
-    # Only trigger on new reactions (not removals)
-    if not event.new_reaction:
+    if not event.new_reaction or not event.user:
         return
     old_count = len(event.old_reaction) if event.old_reaction else 0
     if len(event.new_reaction) <= old_count:
         return
-    if not event.user:
-        return
 
-    bc_id = getattr(event, "business_connection_id", None)
-    cached = None
-    owner = None
+    user_id = event.user.id
+    log.info(
+        "message_reaction: chat=%s msg=%s user=%s reactions=%d->%d",
+        event.chat.id, event.message_id, user_id,
+        old_count, len(event.new_reaction),
+    )
 
-    if bc_id:
-        owner = owner_of(bc_id)
-        if not owner or event.user.id != owner:
-            log.info("Reaction: not from owner (owner=%s, user=%s)", owner, event.user.id)
-            return
-        cached = recall(bc_id, event.chat.id, event.message_id)
-        if not cached:
-            cached = recall_by_chat(owner, event.chat.id, event.message_id)
-    else:
-        # No business_connection_id — try to find by owner + chat + message
-        cached = recall_by_chat(event.user.id, event.chat.id, event.message_id)
-        if cached:
-            owner = event.user.id
+    # aiogram's MessageReactionUpdated doesn't have business_connection_id,
+    # so we always look up by owner + chat + message_id
+    cached = recall_by_chat(user_id, event.chat.id, event.message_id)
 
-    if cached and owner:
+    if cached:
         log.info("Reaction rescue success: kind=%s", cached.get("kind"))
-        await forward_cached(owner, cached, "\u2764\ufe0f <b>Сохранено (реакция)</b>")
+        await forward_cached(user_id, cached, "\u2764\ufe0f <b>Сохранено (реакция)</b>")
     else:
-        log.info("Reaction rescue failed: message %s not in cache", event.message_id)
+        log.info("Reaction rescue: msg %s not in cache for user %s", event.message_id, user_id)
 
 
 # ========================= Private chat commands =========================
