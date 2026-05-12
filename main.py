@@ -125,12 +125,40 @@ def save_connection(bc: BusinessConnection) -> None:
     )
 
 
+def save_connection_raw(conn_id: str, owner_id: int) -> None:
+    """Save connection by raw IDs (when we don't have a BusinessConnection object)."""
+    get_db().execute(
+        """INSERT INTO connections(id, owner_id, enabled, created_at)
+           VALUES(?,?,1,?)
+           ON CONFLICT(id) DO UPDATE SET
+               owner_id = excluded.owner_id,
+               enabled  = 1""",
+        (conn_id, owner_id, now_iso()),
+    )
+
+
 def owner_of(conn_id: str) -> int | None:
     row = get_db().execute(
         "SELECT owner_id FROM connections WHERE id=? AND enabled=1",
         (conn_id,),
     ).fetchone()
     return row[0] if row else None
+
+
+async def ensure_connection(conn_id: str) -> int | None:
+    """Get owner_id, auto-registering via API if not in DB."""
+    owner = owner_of(conn_id)
+    if owner:
+        return owner
+    # Connection not in DB (lost after deploy) — fetch from Telegram API
+    try:
+        bc = await bot.get_business_connection(conn_id)
+        save_connection_raw(conn_id, bc.user.id)
+        log.info("Auto-registered connection %s for user %s", conn_id, bc.user.id)
+        return bc.user.id
+    except Exception as e:
+        log.warning("Failed to fetch connection %s: %s", conn_id, e)
+        return None
 
 
 def _classify(msg: Message) -> tuple[str, str | None, dict]:
@@ -452,17 +480,20 @@ async def on_connect(bc: BusinessConnection) -> None:
 
 @router.business_message()
 async def on_business_message(msg: Message) -> None:
+    conn_id = msg.business_connection_id or ""
+
+    # Auto-register connection if missing (lost after deploy)
+    owner = await ensure_connection(conn_id)
+
     remember(msg)
     log.info(
-        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s",
-        msg.business_connection_id, msg.chat.id, msg.message_id,
+        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s owner=%s",
+        conn_id, msg.chat.id, msg.message_id,
         msg.from_user.id if msg.from_user else None,
-        msg.content_type,
+        msg.content_type, owner,
     )
 
     # Self-destruct rescue: owner replies to a message — resend the cached original
-    conn_id = msg.business_connection_id or ""
-    owner = owner_of(conn_id)
     if not owner or not msg.from_user or msg.from_user.id != owner:
         return
     if not msg.reply_to_message:
@@ -497,7 +528,7 @@ async def on_edited(msg: Message) -> None:
 
 @router.deleted_business_messages()
 async def on_deleted(event: BusinessMessagesDeleted) -> None:
-    owner = owner_of(event.business_connection_id)
+    owner = await ensure_connection(event.business_connection_id)
     if not owner:
         return
 
