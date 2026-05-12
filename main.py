@@ -574,11 +574,21 @@ ALLOWED_UPDATES = [
 
 
 async def main() -> None:
-    log.info("Ghost Recovery Bot startingâ¦")
+    log.info("Ghost Recovery Bot starting...")
+
+    from aiohttp import web
+
+    app = web.Application()
+
+    async def handle_health(_: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    app.router.add_get("/health", handle_health)
+    app.router.add_get("/", handle_health)
 
     if WEBHOOK_URL:
-        # ââ Webhook mode (for server deployment) ââ
-        from aiohttp import web
+        # Webhook mode (for server deployment)
+        from aiogram.types import Update
 
         full_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
         await bot.set_webhook(
@@ -588,33 +598,30 @@ async def main() -> None:
         )
         log.info("Webhook set: %s", full_url)
 
-        app = web.Application()
-
         async def handle_webhook(request: web.Request) -> web.Response:
-            from aiogram.types import Update
             data = await request.json()
             update = Update.model_validate(data, context={"bot": bot})
             await dp.feed_update(bot=bot, update=update)
             return web.Response(text="ok")
 
-        async def handle_health(_: web.Request) -> web.Response:
-            return web.Response(text="ok")
-
         app.router.add_post(WEBHOOK_PATH, handle_webhook)
-        app.router.add_get("/health", handle_health)
 
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, HOST, PORT)
         log.info("Listening on %s:%s", HOST, PORT)
         await site.start()
-        # Keep running
         await asyncio.Event().wait()
     else:
-        # ââ Polling mode (local dev) ââ
+        # Polling mode (local dev) — health server still runs for compatibility
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, HOST, PORT)
+        await site.start()
+        log.info("Health server on %s:%s, starting polling...", HOST, PORT)
+
         await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)
-
 
 if __name__ == "__main__":
     try:
