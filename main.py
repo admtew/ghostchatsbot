@@ -44,7 +44,6 @@ WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8080"))
 
-# Лимит: максимум сообщений в одном уведомлении об удалении
 BATCH_DISPLAY_LIMIT = 30
 
 logging.basicConfig(
@@ -151,7 +150,12 @@ def _classify(msg: Message) -> tuple[str, str | None, dict]:
     if msg.document:
         return "document", msg.document.file_id, {"name": msg.document.file_name}
     if msg.sticker:
-        return "sticker", msg.sticker.file_id, {"emoji": msg.sticker.emoji}
+        return "sticker", msg.sticker.file_id, {
+            "emoji": msg.sticker.emoji,
+            "set_name": msg.sticker.set_name,
+            "is_animated": msg.sticker.is_animated,
+            "is_video": msg.sticker.is_video,
+        }
     if msg.contact:
         return "contact", None, {
             "phone": msg.contact.phone_number,
@@ -165,6 +169,22 @@ def _classify(msg: Message) -> tuple[str, str | None, dict]:
     if msg.text:
         return "text", None, {}
     return msg.content_type or "unknown", None, {}
+
+
+# Человекочитаемые названия типов
+KIND_LABELS = {
+    "text": "Текст",
+    "photo": "Фото",
+    "video": "Видео",
+    "video_note": "Кружочек",
+    "voice": "Голосовое",
+    "audio": "Аудио",
+    "animation": "GIF",
+    "document": "Документ",
+    "sticker": "Стикер",
+    "contact": "Контакт",
+    "location": "Геолокация",
+}
 
 
 def _display_name(msg: Message) -> str:
@@ -210,7 +230,7 @@ def remember(msg: Message) -> None:
 
 def recall(conn_id: str, chat_id: int, message_id: int) -> dict | None:
     row = get_db().execute(
-        """SELECT sender_name, kind, text, caption, file_id, extra
+        """SELECT sender_id, sender_name, kind, text, caption, file_id, extra
              FROM messages
             WHERE conn_id=? AND chat_id=? AND message_id=?""",
         (conn_id, chat_id, message_id),
@@ -218,12 +238,40 @@ def recall(conn_id: str, chat_id: int, message_id: int) -> dict | None:
     if not row:
         return None
     return {
-        "sender_name": row[0],
-        "kind": row[1],
-        "text": row[2],
-        "caption": row[3],
-        "file_id": row[4],
-        "extra": json.loads(row[5]) if row[5] else {},
+        "sender_id": row[0],
+        "sender_name": row[1],
+        "kind": row[2],
+        "text": row[3],
+        "caption": row[4],
+        "file_id": row[5],
+        "extra": json.loads(row[6]) if row[6] else {},
+    }
+
+
+def recall_by_chat(owner_id: int, chat_id: int, message_id: int) -> dict | None:
+    """Recall a message by owner + chat + message_id (without knowing conn_id)."""
+    row = get_db().execute(
+        """SELECT m.sender_id, m.sender_name, m.kind, m.text, m.caption,
+                  m.file_id, m.extra
+             FROM messages m
+             JOIN connections c ON c.id = m.conn_id
+            WHERE c.owner_id = ?
+              AND c.enabled  = 1
+              AND m.chat_id  = ?
+              AND m.message_id = ?
+            LIMIT 1""",
+        (owner_id, chat_id, message_id),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "sender_id": row[0],
+        "sender_name": row[1],
+        "kind": row[2],
+        "text": row[3],
+        "caption": row[4],
+        "file_id": row[5],
+        "extra": json.loads(row[6]) if row[6] else {},
     }
 
 
@@ -257,49 +305,81 @@ def recall_batch(conn_id: str, chat_id: int, message_ids: list[int]) -> list[tup
 # ========================= Resending =========================
 
 async def _send_one(owner: int, item: dict, header: str) -> None:
-    """Send a single cached message to the owner."""
+    """Send a single cached message to the owner with nice formatting."""
     name = _safe(item.get("sender_name") or "Неизвестный")
-    info = f"{header}\n<b>От:</b> {name}"
-    cap = _safe(item.get("caption"))
-    body = f"{info}\n\n{cap}" if cap else info
+    kind = item.get("kind") or "unknown"
+    kind_label = KIND_LABELS.get(kind, kind)
     fid = item.get("file_id")
-    kind = item.get("kind")
+    cap = _safe(item.get("caption"))
+    extra = item.get("extra") or {}
+
+    # Build info header
+    info = f"{header}\n<b>От:</b> {name}\n<b>Тип:</b> {kind_label}"
 
     try:
         if kind == "text":
             text = _safe(item.get("text") or "")
             await bot.send_message(owner, f"{info}\n\n{text}")
+
         elif kind == "photo":
+            body = f"{info}\n\n{cap}" if cap else info
             await bot.send_photo(owner, fid, caption=body)
+
         elif kind == "video":
+            body = f"{info}\n\n{cap}" if cap else info
             await bot.send_video(owner, fid, caption=body)
+
         elif kind == "animation":
+            body = f"{info}\n\n{cap}" if cap else info
             await bot.send_animation(owner, fid, caption=body)
+
         elif kind == "voice":
+            body = f"{info}\n\n{cap}" if cap else info
             await bot.send_voice(owner, fid, caption=body)
+
         elif kind == "audio":
+            body = f"{info}\n\n{cap}" if cap else info
             await bot.send_audio(owner, fid, caption=body)
+
         elif kind == "document":
+            doc_name = extra.get("name", "")
+            doc_info = f"{info}"
+            if doc_name:
+                doc_info += f"\n<b>Файл:</b> {_safe(doc_name)}"
+            body = f"{doc_info}\n\n{cap}" if cap else doc_info
             await bot.send_document(owner, fid, caption=body)
+
         elif kind == "sticker":
-            await bot.send_message(owner, info)
+            emoji = extra.get("emoji", "")
+            set_name = extra.get("set_name", "")
+            sticker_info = info
+            if emoji:
+                sticker_info += f"\n<b>Эмодзи:</b> {emoji}"
+            if set_name:
+                sticker_info += f"\n<b>Набор:</b> {_safe(set_name)}"
+            await bot.send_message(owner, sticker_info)
             await bot.send_sticker(owner, fid)
+
         elif kind == "video_note":
             await bot.send_message(owner, info)
             await bot.send_video_note(owner, fid)
+
         elif kind == "contact":
-            extra = item.get("extra", {})
+            phone = extra.get("phone", "")
+            contact_name = extra.get("name", "")
             await bot.send_message(
                 owner,
-                f"{info}\n\n<b>Контакт:</b> {_safe(extra.get('name', ''))}\n"
-                f"<b>Телефон:</b> {_safe(extra.get('phone', ''))}",
+                f"{info}\n\n<b>Имя:</b> {_safe(contact_name)}\n"
+                f"<b>Телефон:</b> {_safe(phone)}",
             )
+
         elif kind == "location":
-            extra = item.get("extra", {})
             await bot.send_message(owner, info)
             await bot.send_location(owner, extra["lat"], extra["lon"])
+
         else:
             await bot.send_message(owner, f"{info}\n\n<i>[{_safe(kind)}]</i>")
+
     except Exception as e:
         log.warning("resend failed for %s: %s", kind, e)
         await bot.send_message(
@@ -315,11 +395,11 @@ async def forward_deleted_batch(
 ) -> None:
     """Send a batch of deleted messages to the owner with a single header."""
     count = len(items)
-    chat_info = f" в чате <b>{_safe(chat_title)}</b>" if chat_title else ""
+    chat_info = f" в чате с <b>{_safe(chat_title)}</b>" if chat_title else ""
 
     if count == 1:
         _, item = items[0]
-        await _send_one(owner, item, "\U0001f5d1 <b>Удалённое сообщение</b>")
+        await _send_one(owner, item, "\U0001f5d1 <b>Удалённое сообщение</b>" + chat_info)
         return
 
     header_text = (
@@ -351,6 +431,7 @@ async def forward_cached(owner: int, item: dict, header: str) -> None:
 @router.business_connection()
 async def on_connect(bc: BusinessConnection) -> None:
     save_connection(bc)
+    log.info("Business connection %s: user=%s enabled=%s", bc.id, bc.user.id, bc.is_enabled)
     try:
         if bc.is_enabled:
             await bot.send_message(
@@ -374,19 +455,37 @@ async def on_connect(bc: BusinessConnection) -> None:
 @router.business_message()
 async def on_business_message(msg: Message) -> None:
     remember(msg)
+    log.info(
+        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s",
+        msg.business_connection_id, msg.chat.id, msg.message_id,
+        msg.from_user.id if msg.from_user else None,
+        msg.content_type,
+    )
 
-    # Self-destruct rescue: owner replies — resend the cached original
-    owner = owner_of(msg.business_connection_id or "")
-    if (
-        owner
-        and msg.from_user
-        and msg.from_user.id == owner
-        and msg.reply_to_message
-    ):
-        r = msg.reply_to_message
-        cached = recall(msg.business_connection_id, r.chat.id, r.message_id)
-        if cached:
-            await forward_cached(owner, cached, "\U0001f4f8 <b>Сохранено</b>")
+    # Self-destruct rescue: owner replies to a message — resend the cached original
+    conn_id = msg.business_connection_id or ""
+    owner = owner_of(conn_id)
+    if not owner or not msg.from_user or msg.from_user.id != owner:
+        return
+    if not msg.reply_to_message:
+        return
+
+    r = msg.reply_to_message
+    log.info(
+        "Owner replied to msg %s in chat %s (conn=%s), attempting rescue",
+        r.message_id, msg.chat.id, conn_id,
+    )
+
+    # Try by conn_id first, then fallback to chat-based lookup
+    cached = recall(conn_id, msg.chat.id, r.message_id)
+    if not cached:
+        cached = recall_by_chat(owner, msg.chat.id, r.message_id)
+
+    if cached:
+        log.info("Rescue success: kind=%s", cached.get("kind"))
+        await forward_cached(owner, cached, "\U0001f4f8 <b>Сохранено (ответ)</b>")
+    else:
+        log.info("Rescue failed: message %s not in cache", r.message_id)
 
 
 @router.edited_business_message()
@@ -413,6 +512,11 @@ async def on_deleted(event: BusinessMessagesDeleted) -> None:
     # Только сообщения от собеседника (не от владельца)
     items = [(mid, data) for mid, data in all_items if data.get("sender_id") != owner]
 
+    log.info(
+        "deleted_business_messages: conn=%s chat=%s total=%d from_contact=%d",
+        event.business_connection_id, event.chat.id, len(event.message_ids), len(items),
+    )
+
     if not items:
         return
 
@@ -423,58 +527,51 @@ async def on_deleted(event: BusinessMessagesDeleted) -> None:
 
     await forward_deleted_batch(owner, items, chat_title)
 
-    found_ids = {m_id for m_id, _ in items}
-    missing = [m_id for m_id in event.message_ids if m_id not in found_ids]
-    if missing:
-        await bot.send_message(
-            owner,
-            f"<i>Ещё {len(missing)} удал. сообщ. не были в кэше.</i>",
-        )
-
 
 @router.message_reaction()
 async def on_reaction(event: MessageReactionUpdated) -> None:
     """Rescue self-destruct media when the owner adds a reaction."""
-    if not event.new_reaction or len(event.new_reaction) <= len(event.old_reaction or []):
+    log.info(
+        "message_reaction: chat=%s msg=%s user=%s new=%s old=%s bc_id=%s",
+        event.chat.id, event.message_id,
+        event.user.id if event.user else None,
+        len(event.new_reaction) if event.new_reaction else 0,
+        len(event.old_reaction) if event.old_reaction else 0,
+        getattr(event, "business_connection_id", None),
+    )
+
+    # Only trigger on new reactions (not removals)
+    if not event.new_reaction:
+        return
+    old_count = len(event.old_reaction) if event.old_reaction else 0
+    if len(event.new_reaction) <= old_count:
         return
     if not event.user:
         return
 
     bc_id = getattr(event, "business_connection_id", None)
+    cached = None
+    owner = None
 
     if bc_id:
         owner = owner_of(bc_id)
         if not owner or event.user.id != owner:
+            log.info("Reaction: not from owner (owner=%s, user=%s)", owner, event.user.id)
             return
         cached = recall(bc_id, event.chat.id, event.message_id)
+        if not cached:
+            cached = recall_by_chat(owner, event.chat.id, event.message_id)
     else:
-        db = get_db()
-        row = db.execute(
-            """SELECT m.conn_id, m.sender_name, m.kind, m.text, m.caption,
-                      m.file_id, m.extra
-                 FROM messages m
-                 JOIN connections c ON c.id = m.conn_id
-                WHERE c.owner_id = ?
-                  AND c.enabled  = 1
-                  AND m.chat_id  = ?
-                  AND m.message_id = ?
-                LIMIT 1""",
-            (event.user.id, event.chat.id, event.message_id),
-        ).fetchone()
-        if not row:
-            return
-        owner = event.user.id
-        cached = {
-            "sender_name": row[1],
-            "kind":        row[2],
-            "text":        row[3],
-            "caption":     row[4],
-            "file_id":     row[5],
-            "extra":       json.loads(row[6]) if row[6] else {},
-        }
+        # No business_connection_id — try to find by owner + chat + message
+        cached = recall_by_chat(event.user.id, event.chat.id, event.message_id)
+        if cached:
+            owner = event.user.id
 
-    if cached:
-        await forward_cached(owner, cached, "\u2764\ufe0f <b>Сохранено по реакции</b>")
+    if cached and owner:
+        log.info("Reaction rescue success: kind=%s", cached.get("kind"))
+        await forward_cached(owner, cached, "\u2764\ufe0f <b>Сохранено (реакция)</b>")
+    else:
+        log.info("Reaction rescue failed: message %s not in cache", event.message_id)
 
 
 # ========================= Private chat commands =========================
@@ -485,6 +582,8 @@ async def cmd_start(msg: Message) -> None:
         "\U0001f47b <b>Ghost Recovery Bot</b>\n\n"
         "Я перехватываю и сохраняю сообщения из твоих бизнес-чатов. "
         "Если собеседник удалит что-то — ты получишь копию.\n\n"
+        "\U0001f4f8 <b>Таймер-сообщения:</b> ответь или поставь реакцию — "
+        "я пришлю копию до исчезновения.\n\n"
         "Отправь /help чтобы узнать как подключить."
     )
 
@@ -500,7 +599,7 @@ async def cmd_help(msg: Message) -> None:
         "<b>Что делает бот:</b>\n"
         "\u2022 Тихо сохраняет все входящие сообщения в бизнес-чатах\n"
         "\u2022 Если собеседник удалит 1 или 50 сообщений — ты получишь их все\n"
-        "\u2022 Текст, фото, видео, голосовые, документы, стикеры — всё сохраняется\n\n"
+        "\u2022 Текст, фото, видео, голосовые, документы, стикеры — всё\n\n"
         "\U0001f4f8 <b>Сообщения с таймером:</b>\n"
         "Ответь на такое сообщение любым символом или поставь реакцию — "
         "бот пришлёт тебе копию до того как оно исчезнет.\n\n"
@@ -573,7 +672,6 @@ async def main() -> None:
     app.router.add_get("/", handle_health)
 
     if WEBHOOK_URL:
-        # Webhook mode (for server deployment)
         from aiogram.types import Update
 
         full_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
@@ -599,7 +697,6 @@ async def main() -> None:
         await site.start()
         await asyncio.Event().wait()
     else:
-        # Polling mode (local dev) — health server still runs for compatibility
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, HOST, PORT)
