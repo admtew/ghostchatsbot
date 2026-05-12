@@ -437,16 +437,14 @@ async def on_connect(bc: BusinessConnection) -> None:
             await bot.send_message(
                 bc.user.id,
                 "\u2705 <b>Бот подключён</b>\n\n"
-                "Я тихо сохраняю входящие сообщения и пришлю всё, "
-                "что собеседник удалит — даже если удалит сразу пачку.\n\n"
-                "\U0001f4f8 <b>Сообщения с таймером</b> — ответь на такое сообщение "
-                "любым символом или поставь реакцию, я пришлю копию.\n\n"
-                "\U0001f512 Данные хранятся только на своём сервере.\n\n"
-                "/help — справка \u2022 /status — статус \u2022 /wipe — очистить кэш",
+                "Теперь я слежу за твоими чатами в фоне.\n"
+                "Если кто-то удалит сообщение \u2014 пришлю копию.\n\n"
+                "\u23f3 Таймер-сообщение? Ответь или поставь реакцию \u2014 сохраню.\n\n"
+                "/help \u2014 подробнее",
             )
         else:
             await bot.send_message(
-                bc.user.id, "\U0001f6d1 Бот отключён, отслеживание остановлено."
+                bc.user.id, "\U0001f6d1 Бот отключён."
             )
     except Exception as e:
         log.warning("notify on connect failed: %s", e)
@@ -561,70 +559,30 @@ async def on_reaction(event: MessageReactionUpdated) -> None:
 async def cmd_start(msg: Message) -> None:
     await msg.answer(
         "\U0001f47b <b>Ghost Recovery Bot</b>\n\n"
-        "Я перехватываю и сохраняю сообщения из твоих бизнес-чатов. "
-        "Если собеседник удалит что-то — ты получишь копию.\n\n"
-        "\U0001f4f8 <b>Таймер-сообщения:</b> ответь или поставь реакцию — "
-        "я пришлю копию до исчезновения.\n\n"
-        "Отправь /help чтобы узнать как подключить."
+        "Восстанавливаю удалённые сообщения из твоих чатов.\n\n"
+        "\U0001f4ac Собеседник удалил текст, фото, видео, голосовое или стикер — "
+        "ты получишь копию.\n\n"
+        "\u23f3 Сообщение с таймером? Ответь на него или поставь реакцию — "
+        "я сохраню до исчезновения.\n\n"
+        "/help — как подключить"
     )
 
 
 @router.message(Command("help"))
 async def cmd_help(msg: Message) -> None:
     await msg.answer(
-        "\U0001f4d6 <b>Как работает Ghost Recovery Bot</b>\n\n"
-        "<b>Подключение:</b>\n"
-        "1. Открой Telegram \u2192 <b>Настройки</b> \u2192 <b>Telegram Business</b>\n"
-        "2. Раздел <b>Чат-боты</b> \u2192 введи юзернейм этого бота\n"
-        "3. Подключи и дай разрешения на чтение сообщений\n\n"
-        "<b>Что делает бот:</b>\n"
-        "\u2022 Тихо сохраняет все входящие сообщения в бизнес-чатах\n"
-        "\u2022 Если собеседник удалит 1 или 50 сообщений — ты получишь их все\n"
-        "\u2022 Текст, фото, видео, голосовые, документы, стикеры — всё\n\n"
-        "\U0001f4f8 <b>Сообщения с таймером:</b>\n"
-        "Ответь на такое сообщение любым символом или поставь реакцию — "
-        "бот пришлёт тебе копию до того как оно исчезнет.\n\n"
-        "<b>Команды:</b>\n"
-        "/start — приветствие\n"
-        "/help — эта справка\n"
-        "/status — статус подключения и кэша\n"
-        "/wipe — полностью очистить сохранённые данные\n\n"
-        "\U0001f512 Все данные хранятся только на своём сервере. "
-        "Бот не передаёт их третьим лицам."
+        "\U0001f4d6 <b>Как подключить</b>\n\n"
+        "1. <b>Настройки</b> \u2192 <b>Telegram Business</b> \u2192 <b>Чат-боты</b>\n"
+        "2. Найди этого бота и подключи\n"
+        "3. Готово \u2014 бот работает в фоне\n\n"
+        "<b>Что умеет:</b>\n"
+        "\u2022 Удалённые сообщения \u2014 пришлю копию\n"
+        "\u2022 Фото, видео, голосовые, стикеры, GIF, документы\n"
+        "\u2022 Таймер-сообщения \u2014 ответь или поставь реакцию\n\n"
+        "\U0001f512 Всё анонимно, данные не хранятся на серверах."
     )
 
 
-@router.message(Command("status"))
-async def cmd_status(msg: Message) -> None:
-    uid = msg.from_user.id
-    db = get_db()
-    connected = db.execute(
-        "SELECT COUNT(*) FROM connections WHERE owner_id=? AND enabled=1",
-        (uid,),
-    ).fetchone()[0]
-    cached = db.execute(
-        """SELECT COUNT(*) FROM messages
-            WHERE conn_id IN (SELECT id FROM connections WHERE owner_id=?)""",
-        (uid,),
-    ).fetchone()[0]
-    line = "\u2705 Подключено" if connected else "\u274c Не подключено"
-    await msg.answer(
-        f"<b>Статус:</b> {line}\n"
-        f"<b>Активных подключений:</b> {connected}\n"
-        f"<b>Сообщений в кэше:</b> {cached}"
-    )
-
-
-@router.message(Command("wipe"))
-async def cmd_wipe(msg: Message) -> None:
-    uid = msg.from_user.id
-    db = get_db()
-    result = db.execute(
-        """DELETE FROM messages
-            WHERE conn_id IN (SELECT id FROM connections WHERE owner_id=?)""",
-        (uid,),
-    )
-    await msg.answer(f"\U0001f9f9 Кэш очищен. Удалено записей: {result.rowcount}")
 
 
 # ========================= Entry =========================
