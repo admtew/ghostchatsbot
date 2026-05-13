@@ -94,6 +94,7 @@ def init_db() -> None:
             caption     TEXT,
             file_id     TEXT,
             extra       TEXT,
+            protected   INTEGER NOT NULL DEFAULT 0,
             created_at  TEXT NOT NULL,
             PRIMARY KEY (conn_id, chat_id, message_id)
         );
@@ -235,11 +236,12 @@ def remember(msg: Message) -> None:
     if not msg.business_connection_id:
         return
     kind, file_id, extra = _classify(msg)
+    protected = 1 if msg.has_protected_content else 0
     get_db().execute(
         """INSERT OR REPLACE INTO messages
            (conn_id, chat_id, message_id, sender_id, sender_name,
-            kind, text, caption, file_id, extra, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            kind, text, caption, file_id, extra, protected, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             msg.business_connection_id,
             msg.chat.id,
@@ -251,6 +253,7 @@ def remember(msg: Message) -> None:
             msg.caption,
             file_id,
             json.dumps(extra, ensure_ascii=False) if extra else None,
+            protected,
             now_iso(),
         ),
     )
@@ -258,7 +261,7 @@ def remember(msg: Message) -> None:
 
 def recall(conn_id: str, chat_id: int, message_id: int) -> dict | None:
     row = get_db().execute(
-        """SELECT sender_id, sender_name, kind, text, caption, file_id, extra
+        """SELECT sender_id, sender_name, kind, text, caption, file_id, extra, protected
              FROM messages
             WHERE conn_id=? AND chat_id=? AND message_id=?""",
         (conn_id, chat_id, message_id),
@@ -273,6 +276,7 @@ def recall(conn_id: str, chat_id: int, message_id: int) -> dict | None:
         "caption": row[4],
         "file_id": row[5],
         "extra": json.loads(row[6]) if row[6] else {},
+        "protected": bool(row[7]),
     }
 
 
@@ -280,7 +284,7 @@ def recall_by_chat(owner_id: int, chat_id: int, message_id: int) -> dict | None:
     """Recall a message by owner + chat + message_id (without knowing conn_id)."""
     row = get_db().execute(
         """SELECT m.sender_id, m.sender_name, m.kind, m.text, m.caption,
-                  m.file_id, m.extra
+                  m.file_id, m.extra, m.protected
              FROM messages m
              JOIN connections c ON c.id = m.conn_id
             WHERE c.owner_id = ?
@@ -300,6 +304,7 @@ def recall_by_chat(owner_id: int, chat_id: int, message_id: int) -> dict | None:
         "caption": row[4],
         "file_id": row[5],
         "extra": json.loads(row[6]) if row[6] else {},
+        "protected": bool(row[7]),
     }
 
 
@@ -310,7 +315,7 @@ def recall_batch(conn_id: str, chat_id: int, message_ids: list[int]) -> list[tup
     db = get_db()
     placeholders = ",".join("?" for _ in message_ids)
     rows = db.execute(
-        f"""SELECT message_id, sender_id, sender_name, kind, text, caption, file_id, extra
+        f"""SELECT message_id, sender_id, sender_name, kind, text, caption, file_id, extra, protected
               FROM messages
              WHERE conn_id=? AND chat_id=? AND message_id IN ({placeholders})
              ORDER BY message_id ASC""",
@@ -326,6 +331,7 @@ def recall_batch(conn_id: str, chat_id: int, message_ids: list[int]) -> list[tup
             "caption": r[5],
             "file_id": r[6],
             "extra": json.loads(r[7]) if r[7] else {},
+            "protected": bool(r[8]),
         }))
     return result
 
@@ -486,11 +492,12 @@ async def on_business_message(msg: Message) -> None:
     owner = await ensure_connection(conn_id)
 
     remember(msg)
+    protected = bool(msg.has_protected_content)
     log.info(
-        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s owner=%s",
+        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s owner=%s protected=%s",
         conn_id, msg.chat.id, msg.message_id,
         msg.from_user.id if msg.from_user else None,
-        msg.content_type, owner,
+        msg.content_type, owner, protected,
     )
 
     # Self-destruct rescue: owner replies to a message — resend the cached original
@@ -510,9 +517,11 @@ async def on_business_message(msg: Message) -> None:
     if not cached:
         cached = recall_by_chat(owner, msg.chat.id, r.message_id)
 
-    if cached:
-        log.info("Rescue success: kind=%s", cached.get("kind"))
-        await forward_cached(owner, cached, "\U0001f4f8 <b>Сохранено (ответ)</b>")
+    if cached and cached.get("protected"):
+        log.info("Rescue success (protected media): kind=%s", cached.get("kind"))
+        await forward_cached(owner, cached, "\u23f3 <b>Таймер-медиа сохранено</b>")
+    elif cached:
+        log.info("Skipped rescue: message %s is not protected (not timer media)", r.message_id)
     else:
         log.info("Rescue failed: message %s not in cache", r.message_id)
 
@@ -577,9 +586,11 @@ async def on_reaction(event: MessageReactionUpdated) -> None:
     # so we always look up by owner + chat + message_id
     cached = recall_by_chat(user_id, event.chat.id, event.message_id)
 
-    if cached:
-        log.info("Reaction rescue success: kind=%s", cached.get("kind"))
-        await forward_cached(user_id, cached, "\u2764\ufe0f <b>Сохранено (реакция)</b>")
+    if cached and cached.get("protected"):
+        log.info("Reaction rescue success (protected): kind=%s", cached.get("kind"))
+        await forward_cached(user_id, cached, "\u23f3 <b>Таймер-медиа сохранено</b>")
+    elif cached:
+        log.info("Skipped reaction rescue: msg %s not protected", event.message_id)
     else:
         log.info("Reaction rescue: msg %s not in cache for user %s", event.message_id, user_id)
 
