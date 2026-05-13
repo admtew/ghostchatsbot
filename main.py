@@ -38,7 +38,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в .env")
 
-DB_PATH = os.getenv("DB_PATH", "data.db")
+_default_db = "/data/ghost.db" if os.path.isdir("/data") else "data.db"
+DB_PATH = os.getenv("DB_PATH", _default_db)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # если задан — webhook-режим
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -665,9 +666,13 @@ async def main() -> None:
         log.info("Webhook set: %s", full_url)
 
         async def handle_webhook(request: web.Request) -> web.Response:
-            data = await request.json()
-            update = Update.model_validate(data, context={"bot": bot})
-            await dp.feed_update(bot=bot, update=update)
+            try:
+                data = await request.json()
+                log.debug("Webhook update keys: %s", list(data.keys()))
+                update = Update.model_validate(data, context={"bot": bot})
+                await dp.feed_update(bot=bot, update=update)
+            except Exception as e:
+                log.error("Webhook handler error: %s — raw keys: %s", e, list(data.keys()) if 'data' in dir() else '?')
             return web.Response(text="ok")
 
         app.router.add_post(WEBHOOK_PATH, handle_webhook)
