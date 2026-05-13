@@ -236,7 +236,9 @@ def remember(msg: Message) -> None:
     if not msg.business_connection_id:
         return
     kind, file_id, extra = _classify(msg)
-    protected = 1 if msg.has_protected_content else 0
+    # View-once / timer media: has_protected_content and/or has_media_spoiler
+    is_timer_media = bool(msg.has_protected_content or msg.has_media_spoiler)
+    protected = 1 if is_timer_media else 0
     get_db().execute(
         """INSERT OR REPLACE INTO messages
            (conn_id, chat_id, message_id, sender_id, sender_name,
@@ -281,18 +283,15 @@ def recall(conn_id: str, chat_id: int, message_id: int) -> dict | None:
 
 
 def recall_by_chat(owner_id: int, chat_id: int, message_id: int) -> dict | None:
-    """Recall a message by owner + chat + message_id (without knowing conn_id)."""
+    """Recall a message by chat + message_id. No JOIN — works even if connections is empty."""
     row = get_db().execute(
-        """SELECT m.sender_id, m.sender_name, m.kind, m.text, m.caption,
-                  m.file_id, m.extra, m.protected
-             FROM messages m
-             JOIN connections c ON c.id = m.conn_id
-            WHERE c.owner_id = ?
-              AND c.enabled  = 1
-              AND m.chat_id  = ?
-              AND m.message_id = ?
+        """SELECT sender_id, sender_name, kind, text, caption,
+                  file_id, extra, protected
+             FROM messages
+            WHERE chat_id = ?
+              AND message_id = ?
             LIMIT 1""",
-        (owner_id, chat_id, message_id),
+        (chat_id, message_id),
     ).fetchone()
     if not row:
         return None
@@ -492,12 +491,14 @@ async def on_business_message(msg: Message) -> None:
     owner = await ensure_connection(conn_id)
 
     remember(msg)
-    protected = bool(msg.has_protected_content)
     log.info(
-        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s owner=%s protected=%s",
+        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s owner=%s "
+        "protected=%s spoiler=%s has_media=%s",
         conn_id, msg.chat.id, msg.message_id,
         msg.from_user.id if msg.from_user else None,
-        msg.content_type, owner, protected,
+        msg.content_type, owner,
+        msg.has_protected_content, msg.has_media_spoiler,
+        bool(msg.photo or msg.video or msg.animation or msg.video_note),
     )
 
     # Self-destruct rescue: owner replies to a message — resend the cached original
