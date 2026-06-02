@@ -2,7 +2,7 @@
 Ghost Recovery Bot
 ------------------
 Recovers messages your contacts delete from your Telegram Business chats.
-Auto-saves vanishing (view-once) media the moment it arrives.
+Saves all message types: text, photo, video, voice, stickers, GIF, documents.
 
 Supports both polling (local dev) and webhook (server deploy) modes.
 
@@ -441,7 +441,6 @@ async def on_connect(bc: BusinessConnection) -> None:
                 "\u2705 <b>Бот подключён</b>\n\n"
                 "Теперь я слежу за твоими чатами в фоне.\n"
                 "Если кто-то удалит сообщение \u2014 пришлю копию.\n\n"
-                "\n"
                 "/help \u2014 подробнее",
             )
         else:
@@ -462,9 +461,11 @@ async def on_business_message(msg: Message) -> None:
     remember(msg)
 
     sender_id = msg.from_user.id if msg.from_user else None
+    kind, file_id, _ = _classify(msg)
     log.info(
-        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s",
-        conn_id, msg.chat.id, msg.message_id, sender_id, msg.content_type,
+        "SAVED msg=%s chat=%s from=%s kind=%s file_id=%s",
+        msg.message_id, msg.chat.id, sender_id, kind,
+        (file_id[:20] + "...") if file_id else None,
     )
 
 
@@ -483,18 +484,27 @@ async def on_deleted(event: BusinessMessagesDeleted) -> None:
     if not owner:
         return
 
+    msg_ids = list(event.message_ids)
     all_items = recall_batch(
         event.business_connection_id,
         event.chat.id,
-        list(event.message_ids),
+        msg_ids,
     )
+
+    # Логируем что нашли и что нет
+    found_ids = {mid for mid, _ in all_items}
+    missing_ids = [mid for mid in msg_ids if mid not in found_ids]
+    if missing_ids:
+        log.warning("DELETED but NOT in DB: msg_ids=%s (sent before deploy?)", missing_ids)
 
     # Только сообщения от собеседника (не от владельца)
     items = [(mid, data) for mid, data in all_items if data.get("sender_id") != owner]
+    skipped = [(mid, data) for mid, data in all_items if data.get("sender_id") == owner]
 
     log.info(
-        "deleted_business_messages: conn=%s chat=%s total=%d from_contact=%d",
-        event.business_connection_id, event.chat.id, len(event.message_ids), len(items),
+        "DELETED: chat=%s ids=%s found=%d missing=%d from_contact=%d skipped_own=%d owner=%s",
+        event.chat.id, msg_ids, len(all_items), len(missing_ids),
+        len(items), len(skipped), owner,
     )
 
     if not items:
@@ -532,8 +542,7 @@ async def cmd_help(msg: Message) -> None:
         "3. Готово \u2014 бот работает в фоне\n\n"
         "<b>Что умеет:</b>\n"
         "\u2022 Удалённые сообщения \u2014 пришлю копию\n"
-        "\u2022 Фото, видео, голосовые, стикеры, GIF, документы\n"
-        "\n"
+        "\u2022 Фото, видео, голосовые, стикеры, GIF, документы\n\n"
         "\U0001f512 Всё анонимно, данные не хранятся на серверах."
     )
 
