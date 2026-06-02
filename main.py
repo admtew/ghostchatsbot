@@ -1,8 +1,8 @@
 """
 Ghost Recovery Bot
 ------------------
-Recovers messages your contacts delete from your Telegram Business chats,
-and rescues self-destruct media by replying to it or reacting.
+Recovers messages your contacts delete from your Telegram Business chats.
+Auto-saves vanishing (view-once) media the moment it arrives.
 
 Supports both polling (local dev) and webhook (server deploy) modes.
 
@@ -27,7 +27,6 @@ from aiogram.types import (
     BusinessConnection,
     BusinessMessagesDeleted,
     Message,
-    MessageReactionUpdated,
 )
 from dotenv import load_dotenv
 
@@ -283,30 +282,6 @@ def recall(conn_id: str, chat_id: int, message_id: int) -> dict | None:
     }
 
 
-def recall_by_chat(owner_id: int, chat_id: int, message_id: int) -> dict | None:
-    """Recall a message by chat + message_id. No JOIN — works even if connections is empty."""
-    row = get_db().execute(
-        """SELECT sender_id, sender_name, kind, text, caption,
-                  file_id, extra, protected
-             FROM messages
-            WHERE chat_id = ?
-              AND message_id = ?
-            LIMIT 1""",
-        (chat_id, message_id),
-    ).fetchone()
-    if not row:
-        return None
-    return {
-        "sender_id": row[0],
-        "sender_name": row[1],
-        "kind": row[2],
-        "text": row[3],
-        "caption": row[4],
-        "file_id": row[5],
-        "extra": json.loads(row[6]) if row[6] else {},
-        "protected": bool(row[7]),
-    }
-
 
 def recall_batch(conn_id: str, chat_id: int, message_ids: list[int]) -> list[tuple[int, dict]]:
     """Recall multiple messages at once. Returns list of (message_id, data)."""
@@ -473,7 +448,7 @@ async def on_connect(bc: BusinessConnection) -> None:
                 "\u2705 <b>Бот подключён</b>\n\n"
                 "Теперь я слежу за твоими чатами в фоне.\n"
                 "Если кто-то удалит сообщение \u2014 пришлю копию.\n\n"
-                "\u23f3 Таймер-сообщение? Ответь или поставь реакцию \u2014 сохраню.\n\n"
+                "\u23f3 Исчезающие сообщения \u2014 сохраняю автоматически.\n\n"
                 "/help \u2014 подробнее",
             )
         else:
@@ -492,40 +467,43 @@ async def on_business_message(msg: Message) -> None:
     owner = await ensure_connection(conn_id)
 
     remember(msg)
+
+    is_media = bool(
+        msg.photo or msg.video or msg.video_note
+        or msg.voice or msg.animation or msg.document
+    )
+    # Определяем исчезающее сообщение:
+    # В личных/бизнес-чатах has_protected_content на медиа = view-once
+    # has_media_spoiler тоже может быть признаком (одноразовое фото/видео)
+    is_vanish = bool(msg.has_protected_content or msg.has_media_spoiler) and is_media
+
+    sender_id = msg.from_user.id if msg.from_user else None
+    is_from_contact = owner and sender_id and sender_id != owner
+
     log.info(
-        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s owner=%s "
-        "protected=%s spoiler=%s has_media=%s",
+        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s "
+        "vanish=%s protected=%s spoiler=%s",
         conn_id, msg.chat.id, msg.message_id,
-        msg.from_user.id if msg.from_user else None,
-        msg.content_type, owner,
-        msg.has_protected_content, msg.has_media_spoiler,
-        bool(msg.photo or msg.video or msg.animation or msg.video_note),
+        sender_id, msg.content_type,
+        is_vanish, msg.has_protected_content, msg.has_media_spoiler,
     )
 
-    # Self-destruct rescue: owner replies to a message — resend the cached original
-    if not owner or not msg.from_user or msg.from_user.id != owner:
-        return
-    if not msg.reply_to_message:
-        return
-
-    r = msg.reply_to_message
-    log.info(
-        "Owner replied to msg %s in chat %s (conn=%s), attempting rescue",
-        r.message_id, msg.chat.id, conn_id,
-    )
-
-    # Try by conn_id first, then fallback to chat-based lookup
-    cached = recall(conn_id, msg.chat.id, r.message_id)
-    if not cached:
-        cached = recall_by_chat(owner, msg.chat.id, r.message_id)
-
-    if cached and cached.get("protected"):
-        log.info("Rescue success (protected media): kind=%s", cached.get("kind"))
-        await forward_cached(owner, cached, "\u23f3 <b>Таймер-медиа сохранено</b>")
-    elif cached:
-        log.info("Skipped rescue: message %s is not protected (not timer media)", r.message_id)
-    else:
-        log.info("Rescue failed: message %s not in cache", r.message_id)
+    # Исчезающее медиа от собеседника — автоматически сохраняем и пересылаем
+    if is_vanish and is_from_contact:
+        cached = recall(conn_id, msg.chat.id, msg.message_id)
+        if cached:
+            chat_name = ""
+            if msg.chat.first_name:
+                parts = [msg.chat.first_name, msg.chat.last_name]
+                chat_name = " ".join(p for p in parts if p)
+            header = "\u23f3 <b>Исчезающее сообщение сохранено</b>"
+            if chat_name:
+                header += f"\n<b>Чат:</b> {_safe(chat_name)}"
+            await forward_cached(owner, cached, header)
+            log.info(
+                "Auto-saved vanish media: chat=%s msg=%s kind=%s",
+                msg.chat.id, msg.message_id, cached.get("kind"),
+            )
 
 
 @router.edited_business_message()
@@ -568,33 +546,6 @@ async def on_deleted(event: BusinessMessagesDeleted) -> None:
     await forward_deleted_batch(owner, items, chat_title)
 
 
-@router.message_reaction()
-async def on_reaction(event: MessageReactionUpdated) -> None:
-    """Rescue self-destruct media when the owner adds a reaction."""
-    if not event.new_reaction or not event.user:
-        return
-    old_count = len(event.old_reaction) if event.old_reaction else 0
-    if len(event.new_reaction) <= old_count:
-        return
-
-    user_id = event.user.id
-    log.info(
-        "message_reaction: chat=%s msg=%s user=%s reactions=%d->%d",
-        event.chat.id, event.message_id, user_id,
-        old_count, len(event.new_reaction),
-    )
-
-    # aiogram's MessageReactionUpdated doesn't have business_connection_id,
-    # so we always look up by owner + chat + message_id
-    cached = recall_by_chat(user_id, event.chat.id, event.message_id)
-
-    if cached and cached.get("protected"):
-        log.info("Reaction rescue success (protected): kind=%s", cached.get("kind"))
-        await forward_cached(user_id, cached, "\u23f3 <b>Таймер-медиа сохранено</b>")
-    elif cached:
-        log.info("Skipped reaction rescue: msg %s not protected", event.message_id)
-    else:
-        log.info("Reaction rescue: msg %s not in cache for user %s", event.message_id, user_id)
 
 
 # ========================= Private chat commands =========================
@@ -606,8 +557,7 @@ async def cmd_start(msg: Message) -> None:
         "Восстанавливаю удалённые сообщения из твоих чатов.\n\n"
         "\U0001f4ac Собеседник удалил текст, фото, видео, голосовое или стикер — "
         "ты получишь копию.\n\n"
-        "\u23f3 Сообщение с таймером? Ответь на него или поставь реакцию — "
-        "я сохраню до исчезновения.\n\n"
+        "\u23f3 Исчезающие сообщения? Сохраняю автоматически.\n\n"
         "/help — как подключить"
     )
 
@@ -622,7 +572,7 @@ async def cmd_help(msg: Message) -> None:
         "<b>Что умеет:</b>\n"
         "\u2022 Удалённые сообщения \u2014 пришлю копию\n"
         "\u2022 Фото, видео, голосовые, стикеры, GIF, документы\n"
-        "\u2022 Таймер-сообщения \u2014 ответь или поставь реакцию\n\n"
+        "\u2022 Исчезающие сообщения \u2014 сохраняю автоматически\n\n"
         "\U0001f512 Всё анонимно, данные не хранятся на серверах."
     )
 
@@ -637,7 +587,6 @@ ALLOWED_UPDATES = [
     "business_message",
     "edited_business_message",
     "deleted_business_messages",
-    "message_reaction",
 ]
 
 
