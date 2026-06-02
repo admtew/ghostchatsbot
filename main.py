@@ -58,6 +58,7 @@ router = Router(name="ghost")
 dp.include_router(router)
 
 
+
 # ========================= Storage =========================
 
 _db: sqlite3.Connection | None = None
@@ -236,14 +237,11 @@ def remember(msg: Message) -> None:
     if not msg.business_connection_id:
         return
     kind, file_id, extra = _classify(msg)
-    # View-once / timer media: has_protected_content and/or has_media_spoiler
-    is_timer_media = bool(msg.has_protected_content or msg.has_media_spoiler)
-    protected = 1 if is_timer_media else 0
     get_db().execute(
         """INSERT OR REPLACE INTO messages
            (conn_id, chat_id, message_id, sender_id, sender_name,
             kind, text, caption, file_id, extra, protected, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,0,?)""",
         (
             msg.business_connection_id,
             msg.chat.id,
@@ -255,7 +253,6 @@ def remember(msg: Message) -> None:
             msg.caption,
             file_id,
             json.dumps(extra, ensure_ascii=False) if extra else None,
-            protected,
             now_iso(),
         ),
     )
@@ -430,10 +427,6 @@ async def forward_deleted_batch(
         )
 
 
-async def forward_cached(owner: int, item: dict, header: str) -> None:
-    """Send a single cached message (for reaction/reply saves)."""
-    await _send_one(owner, item, header)
-
 
 # ========================= Business handlers =========================
 
@@ -448,7 +441,7 @@ async def on_connect(bc: BusinessConnection) -> None:
                 "\u2705 <b>Бот подключён</b>\n\n"
                 "Теперь я слежу за твоими чатами в фоне.\n"
                 "Если кто-то удалит сообщение \u2014 пришлю копию.\n\n"
-                "\u23f3 Исчезающие сообщения \u2014 сохраняю автоматически.\n\n"
+                "\n"
                 "/help \u2014 подробнее",
             )
         else:
@@ -468,42 +461,11 @@ async def on_business_message(msg: Message) -> None:
 
     remember(msg)
 
-    is_media = bool(
-        msg.photo or msg.video or msg.video_note
-        or msg.voice or msg.animation or msg.document
-    )
-    # Определяем исчезающее сообщение:
-    # В личных/бизнес-чатах has_protected_content на медиа = view-once
-    # has_media_spoiler тоже может быть признаком (одноразовое фото/видео)
-    is_vanish = bool(msg.has_protected_content or msg.has_media_spoiler) and is_media
-
     sender_id = msg.from_user.id if msg.from_user else None
-    is_from_contact = owner and sender_id and sender_id != owner
-
     log.info(
-        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s "
-        "vanish=%s protected=%s spoiler=%s",
-        conn_id, msg.chat.id, msg.message_id,
-        sender_id, msg.content_type,
-        is_vanish, msg.has_protected_content, msg.has_media_spoiler,
+        "business_message: conn=%s chat=%s msg=%s from=%s kind=%s",
+        conn_id, msg.chat.id, msg.message_id, sender_id, msg.content_type,
     )
-
-    # Исчезающее медиа от собеседника — автоматически сохраняем и пересылаем
-    if is_vanish and is_from_contact:
-        cached = recall(conn_id, msg.chat.id, msg.message_id)
-        if cached:
-            chat_name = ""
-            if msg.chat.first_name:
-                parts = [msg.chat.first_name, msg.chat.last_name]
-                chat_name = " ".join(p for p in parts if p)
-            header = "\u23f3 <b>Исчезающее сообщение сохранено</b>"
-            if chat_name:
-                header += f"\n<b>Чат:</b> {_safe(chat_name)}"
-            await forward_cached(owner, cached, header)
-            log.info(
-                "Auto-saved vanish media: chat=%s msg=%s kind=%s",
-                msg.chat.id, msg.message_id, cached.get("kind"),
-            )
 
 
 @router.edited_business_message()
@@ -557,7 +519,6 @@ async def cmd_start(msg: Message) -> None:
         "Восстанавливаю удалённые сообщения из твоих чатов.\n\n"
         "\U0001f4ac Собеседник удалил текст, фото, видео, голосовое или стикер — "
         "ты получишь копию.\n\n"
-        "\u23f3 Исчезающие сообщения? Сохраняю автоматически.\n\n"
         "/help — как подключить"
     )
 
@@ -572,7 +533,7 @@ async def cmd_help(msg: Message) -> None:
         "<b>Что умеет:</b>\n"
         "\u2022 Удалённые сообщения \u2014 пришлю копию\n"
         "\u2022 Фото, видео, голосовые, стикеры, GIF, документы\n"
-        "\u2022 Исчезающие сообщения \u2014 сохраняю автоматически\n\n"
+        "\n"
         "\U0001f512 Всё анонимно, данные не хранятся на серверах."
     )
 
