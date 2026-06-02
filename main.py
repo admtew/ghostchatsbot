@@ -237,25 +237,35 @@ def remember(msg: Message) -> None:
     if not msg.business_connection_id:
         return
     kind, file_id, extra = _classify(msg)
-    get_db().execute(
-        """INSERT OR REPLACE INTO messages
-           (conn_id, chat_id, message_id, sender_id, sender_name,
-            kind, text, caption, file_id, extra, protected, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,0,?)""",
-        (
-            msg.business_connection_id,
-            msg.chat.id,
-            msg.message_id,
-            msg.from_user.id if msg.from_user else None,
-            _display_name(msg),
-            kind,
-            msg.text,
-            msg.caption,
-            file_id,
-            json.dumps(extra, ensure_ascii=False) if extra else None,
-            now_iso(),
-        ),
-    )
+    try:
+        get_db().execute(
+            """INSERT OR REPLACE INTO messages
+               (conn_id, chat_id, message_id, sender_id, sender_name,
+                kind, text, caption, file_id, extra, protected, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,0,?)""",
+            (
+                msg.business_connection_id,
+                msg.chat.id,
+                msg.message_id,
+                msg.from_user.id if msg.from_user else None,
+                _display_name(msg),
+                kind,
+                msg.text,
+                msg.caption,
+                file_id,
+                json.dumps(extra, ensure_ascii=False) if extra else None,
+                now_iso(),
+            ),
+        )
+        # Верификация что записалось
+        check = get_db().execute(
+            "SELECT kind, sender_id FROM messages WHERE conn_id=? AND chat_id=? AND message_id=?",
+            (msg.business_connection_id, msg.chat.id, msg.message_id),
+        ).fetchone()
+        if not check:
+            log.error("DB WRITE FAILED: msg=%s not found after insert!", msg.message_id)
+    except Exception as e:
+        log.error("DB ERROR in remember(): msg=%s err=%s", msg.message_id, e)
 
 
 def recall(conn_id: str, chat_id: int, message_id: int) -> dict | None:
@@ -317,6 +327,7 @@ async def _send_one(owner: int, item: dict, header: str) -> None:
     kind_label = KIND_LABELS.get(kind, kind)
     fid = item.get("file_id")
     cap = _safe(item.get("caption"))
+    log.info("SENDING to %s: kind=%s file_id=%s text=%s", owner, kind, bool(fid), bool(item.get("text")))
     extra = item.get("extra") or {}
 
     # Build info header
