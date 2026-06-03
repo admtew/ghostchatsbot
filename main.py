@@ -168,13 +168,13 @@ def _classify(msg: Message) -> tuple[str, str | None, dict]:
     if msg.photo:
         return "photo", msg.photo[-1].file_id, {}
     if msg.video:
-        return "video", msg.video.file_id, {}
+        return "video", msg.video.file_id, {"duration": msg.video.duration}
     if msg.video_note:
-        return "video_note", msg.video_note.file_id, {}
+        return "video_note", msg.video_note.file_id, {"duration": msg.video_note.duration, "length": msg.video_note.length}
     if msg.voice:
-        return "voice", msg.voice.file_id, {}
+        return "voice", msg.voice.file_id, {"duration": msg.voice.duration}
     if msg.audio:
-        return "audio", msg.audio.file_id, {}
+        return "audio", msg.audio.file_id, {"duration": msg.audio.duration}
     if msg.animation:
         return "animation", msg.animation.file_id, {}
     if msg.document:
@@ -320,6 +320,13 @@ def recall_batch(conn_id: str, chat_id: int, message_ids: list[int]) -> list[tup
 
 # ========================= Resending =========================
 
+def _trim_caption(text: str, limit: int = 1024) -> str:
+    """Trim caption to Telegram's limit, preserving HTML safety."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
 async def _send_one(owner: int, item: dict, header: str) -> None:
     """Send a single cached message to the owner with nice formatting."""
     name = _safe(item.get("sender_name") or "Неизвестный")
@@ -339,23 +346,23 @@ async def _send_one(owner: int, item: dict, header: str) -> None:
             await bot.send_message(owner, f"{info}\n\n{text}")
 
         elif kind == "photo":
-            body = f"{info}\n\n{cap}" if cap else info
+            body = _trim_caption(f"{info}\n\n{cap}" if cap else info)
             await bot.send_photo(owner, fid, caption=body)
 
         elif kind == "video":
-            body = f"{info}\n\n{cap}" if cap else info
+            body = _trim_caption(f"{info}\n\n{cap}" if cap else info)
             await bot.send_video(owner, fid, caption=body)
 
         elif kind == "animation":
-            body = f"{info}\n\n{cap}" if cap else info
+            body = _trim_caption(f"{info}\n\n{cap}" if cap else info)
             await bot.send_animation(owner, fid, caption=body)
 
         elif kind == "voice":
-            body = f"{info}\n\n{cap}" if cap else info
+            body = _trim_caption(f"{info}\n\n{cap}" if cap else info)
             await bot.send_voice(owner, fid, caption=body)
 
         elif kind == "audio":
-            body = f"{info}\n\n{cap}" if cap else info
+            body = _trim_caption(f"{info}\n\n{cap}" if cap else info)
             await bot.send_audio(owner, fid, caption=body)
 
         elif kind == "document":
@@ -363,7 +370,7 @@ async def _send_one(owner: int, item: dict, header: str) -> None:
             doc_info = f"{info}"
             if doc_name:
                 doc_info += f"\n<b>Файл:</b> {_safe(doc_name)}"
-            body = f"{doc_info}\n\n{cap}" if cap else doc_info
+            body = _trim_caption(f"{doc_info}\n\n{cap}" if cap else doc_info)
             await bot.send_document(owner, fid, caption=body)
 
         elif kind == "sticker":
@@ -378,8 +385,9 @@ async def _send_one(owner: int, item: dict, header: str) -> None:
             await bot.send_sticker(owner, fid)
 
         elif kind == "video_note":
-            await bot.send_message(owner, info)
+            # Send media first, then header — so media is never lost
             await bot.send_video_note(owner, fid)
+            await bot.send_message(owner, info)
 
         elif kind == "contact":
             phone = extra.get("phone", "")
@@ -391,14 +399,30 @@ async def _send_one(owner: int, item: dict, header: str) -> None:
             )
 
         elif kind == "location":
-            await bot.send_message(owner, info)
             await bot.send_location(owner, extra["lat"], extra["lon"])
+            await bot.send_message(owner, info)
 
         else:
             await bot.send_message(owner, f"{info}\n\n<i>[{_safe(kind)}]</i>")
 
     except Exception as e:
         log.warning("resend failed for %s: %s", kind, e)
+        # Try to send media without header as fallback
+        if fid and kind in ("video_note", "voice", "video", "photo", "animation", "audio"):
+            try:
+                send_fn = {
+                    "video_note": bot.send_video_note,
+                    "voice": bot.send_voice,
+                    "video": bot.send_video,
+                    "photo": bot.send_photo,
+                    "animation": bot.send_animation,
+                    "audio": bot.send_audio,
+                }[kind]
+                await send_fn(owner, fid)
+                await bot.send_message(owner, f"{info}\n\n<i>(заголовок отправлен отдельно)</i>")
+                return
+            except Exception as e2:
+                log.warning("fallback resend also failed for %s: %s", kind, e2)
         await bot.send_message(
             owner,
             f"{info}\n\n<i>Не удалось переслать ({e.__class__.__name__}).</i>",
@@ -486,9 +510,7 @@ async def on_business_message(msg: Message) -> None:
 async def on_edited(msg: Message) -> None:
     if not msg.business_connection_id:
         return
-    existing = recall(msg.business_connection_id, msg.chat.id, msg.message_id)
-    if existing is None:
-        remember(msg)
+    remember(msg)
 
 
 @router.deleted_business_messages()
