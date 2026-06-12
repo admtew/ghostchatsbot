@@ -15,8 +15,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sqlite3
 import html
+import time
 from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, Router
@@ -103,6 +105,12 @@ def init_db() -> None:
             ON messages(conn_id, chat_id, message_id);
         CREATE INDEX IF NOT EXISTS idx_connections_owner
             ON connections(owner_id, enabled);
+        CREATE TABLE IF NOT EXISTS mutes (
+            conn_id  TEXT    NOT NULL,
+            chat_id  INTEGER NOT NULL,
+            until    INTEGER,            -- unix ts окончания; NULL = бессрочно
+            PRIMARY KEY (conn_id, chat_id)
+        );
         """
     )
 
@@ -463,6 +471,114 @@ async def forward_deleted_batch(
 
 
 
+# ========================= Mute =========================
+
+# ID сообщений, удалённых самим ботом (мьют) — чтобы ghost-recovery
+# не пересылал их владельцу как "удалённые собеседником".
+_self_deleted: set[tuple[str, int, int]] = set()
+
+_DUR_UNITS = {
+    "s": 1, "sec": 1, "с": 1, "сек": 1,
+    "m": 60, "min": 60, "м": 60, "мин": 60,
+    "h": 3600, "hr": 3600, "hour": 3600, "ч": 3600, "час": 3600,
+    "d": 86400, "day": 86400, "д": 86400, "дн": 86400, "день": 86400,
+}
+
+
+def parse_duration(arg: str) -> int | None:
+    """'5min'/'30s'/'2h'/'1д' → секунды. Пустая строка или мусор → None (бессрочно)."""
+    arg = (arg or "").strip().lower()
+    if not arg:
+        return None
+    m = re.fullmatch(r"(\d+)\s*([a-zа-яё]*)", arg)
+    if not m:
+        return None
+    num = int(m.group(1))
+    unit = m.group(2) or "min"          # число без единицы трактуем как минуты
+    return num * _DUR_UNITS.get(unit, 60)
+
+
+def human_left(secs: int) -> str:
+    if secs >= 86400:
+        return f"{secs // 86400} дн"
+    if secs >= 3600:
+        return f"{secs // 3600} ч"
+    if secs >= 60:
+        return f"{secs // 60} мин"
+    return f"{secs} сек"
+
+
+def set_mute(conn_id: str, chat_id: int, until: int | None) -> None:
+    get_db().execute(
+        """INSERT INTO mutes(conn_id, chat_id, until) VALUES(?,?,?)
+           ON CONFLICT(conn_id, chat_id) DO UPDATE SET until = excluded.until""",
+        (conn_id, chat_id, until),
+    )
+
+
+def clear_mute(conn_id: str, chat_id: int) -> None:
+    get_db().execute(
+        "DELETE FROM mutes WHERE conn_id=? AND chat_id=?", (conn_id, chat_id)
+    )
+
+
+def mute_active(conn_id: str, chat_id: int) -> bool:
+    """True, если чат заглушён. Истёкший мьют автоматически снимается."""
+    row = get_db().execute(
+        "SELECT until FROM mutes WHERE conn_id=? AND chat_id=?", (conn_id, chat_id)
+    ).fetchone()
+    if not row:
+        return False
+    until = row[0]
+    if until is not None and time.time() >= until:
+        clear_mute(conn_id, chat_id)
+        return False
+    return True
+
+
+async def handle_mute_command(msg: Message, conn_id: str, owner: int) -> bool:
+    """Обрабатывает .mute / .unmute от владельца. Возвращает True, если это была команда."""
+    text = (msg.text or "").strip()
+    low = text.lower()
+    if not (low == ".mute" or low.startswith(".mute ")
+            or low == ".unmute" or low.startswith(".unmute ")):
+        return False
+
+    chat_id = msg.chat.id
+
+    # Удаляем саму команду из чата, чтобы собеседник её не видел
+    try:
+        await bot.delete_business_messages(business_connection_id=conn_id,
+                                           message_ids=[msg.message_id])
+        _self_deleted.add((conn_id, chat_id, msg.message_id))
+    except Exception as e:
+        log.warning("mute: can't delete command msg: %s", e)
+
+    if low.startswith(".unmute"):
+        clear_mute(conn_id, chat_id)
+        await _notify_owner(owner, "\U0001f50a <b>Чат разглушён.</b> Сообщения собеседника снова приходят.")
+        return True
+
+    arg = text[len(".mute"):].strip()
+    secs = parse_duration(arg)
+    until = int(time.time()) + secs if secs else None
+    set_mute(conn_id, chat_id, until)
+    when = f"на <b>{human_left(secs)}</b>" if secs else "<b>бессрочно</b>"
+    await _notify_owner(
+        owner,
+        f"\U0001f507 <b>Чат заглушён {when}.</b>\n"
+        f"Новые сообщения собеседника я буду удалять. <code>.unmute</code> — снять.",
+    )
+    return True
+
+
+async def _notify_owner(owner: int, text: str) -> None:
+    try:
+        await bot.send_message(owner, text)
+    except Exception as e:
+        log.warning("notify owner failed: %s", e)
+
+
 # ========================= Business handlers =========================
 
 @router.business_connection()
@@ -494,10 +610,26 @@ async def on_business_message(msg: Message) -> None:
 
     # Auto-register connection if missing (lost after deploy)
     owner = await ensure_connection(conn_id)
+    sender_id = msg.from_user.id if msg.from_user else None
+
+    # --- Команды владельца: .mute / .unmute ---
+    if owner and sender_id == owner and (msg.text or "").lstrip().lower().startswith((".mute", ".unmute")):
+        if await handle_mute_command(msg, conn_id, owner):
+            return
+
+    # --- Мьют активен: удаляем сообщение собеседника ---
+    if owner and sender_id != owner and mute_active(conn_id, msg.chat.id):
+        try:
+            await bot.delete_business_messages(business_connection_id=conn_id,
+                                               message_ids=[msg.message_id])
+            _self_deleted.add((conn_id, msg.chat.id, msg.message_id))
+            log.info("MUTE: deleted msg=%s in chat=%s", msg.message_id, msg.chat.id)
+        except Exception as e:
+            log.warning("MUTE: delete failed for msg=%s: %s", msg.message_id, e)
+        return
 
     remember(msg)
 
-    sender_id = msg.from_user.id if msg.from_user else None
     kind, file_id, _ = _classify(msg)
     log.info(
         "SAVED msg=%s chat=%s from=%s kind=%s file_id=%s",
@@ -519,9 +651,21 @@ async def on_deleted(event: BusinessMessagesDeleted) -> None:
     if not owner:
         return
 
-    msg_ids = list(event.message_ids)
+    conn_id = event.business_connection_id
+
+    # Отсеиваем сообщения, которые удалил сам бот (мьют) — их не пересылаем
+    msg_ids = []
+    for mid in event.message_ids:
+        key = (conn_id, event.chat.id, mid)
+        if key in _self_deleted:
+            _self_deleted.discard(key)
+        else:
+            msg_ids.append(mid)
+    if not msg_ids:
+        return
+
     all_items = recall_batch(
-        event.business_connection_id,
+        conn_id,
         event.chat.id,
         msg_ids,
     )
