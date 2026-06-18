@@ -1,95 +1,93 @@
 # Ghost Recovery Bot
 
-Anonymous, selfâhosted Telegram bot that brings back messages your contacts delete from your Business chats â text, photo, video, voice, videoânote, sticker, GIF, audio, document â and rescues selfâdestruct media on demand.
+Личный агент для твоих Telegram Business чатов. Возвращает то, что собеседники
+пытаются спрятать, и присылает копии **только тебе**:
 
-Works like *dialogspybot*, but everything stays on **your** server. No thirdâparty cloud, no history sharing, no analytics.
+- 🗑 **удалённые** сообщения — текст, фото, видео, голосовое, кружок, стикер, GIF, аудио, документ, контакт, гео, опрос;
+- ✏️ **изменённые** — приходит «было → стало»;
+- 👻 **одноразовое медиа** (self-destruct / посмотреть один раз) — сохраняется до того, как исчезнет.
 
----
+Всё хранится на **твоём** сервере в одном SQLite-файле. Никаких сторонних
+облаков, обмена историей или аналитики.
 
-## Features
+## Архитектура
 
-- Catches deleted messages via Telegram Business API and forwards them to you only
-- Rescues selfâdestruct photos/videos: reply to the message with anything and the bot resends the cached copy
-- Stores messages locally in a single SQLite file (WAL mode, fast)
-- Multiâuser safe: every connection is keyed to its owner, no crossâuser leaks
-- `/wipe` command to erase your cache at any moment
-- One file, ~300 lines, ready to fork
+Код разбит на пакет `ghostbot/`, чтобы его было удобно править:
 
-## Requirements
+| Файл | За что отвечает |
+|---|---|
+| `config.py` | переменные окружения, константы, логирование |
+| `formatting.py` | классификация типов сообщений, экранирование, заголовки |
+| `storage.py` | SQLite + горячий кэш в памяти (write-through), история правок, мьюты |
+| `sender.py` | устойчивая доставка: ретрай на флуд-лимите, медиа+подпись одним сообщением |
+| `handlers.py` | обработчики апдейтов Telegram и команды |
+| `app.py` | сборка бота, режим webhook / polling |
+| `main.py` | точка входа (`python main.py`) |
+
+### Почему теперь работает надёжно
+
+- **Гонка «удаление пришло раньше сохранения»** — главная причина пропавших
+  уведомлений. `remember()` пишет сообщение синхронно в кэш памяти *и* в БД, а
+  обработчик удаления сначала читает кэш и, если чего-то не хватает, повторяет
+  попытку несколько раз (входящий апдеж мог ещё не дойти).
+- **«Приходило только фото / только заголовок»** — там, где Telegram позволяет,
+  заголовок и медиа уходят **одним** сообщением (caption). Каждая отправка
+  переживает флуд-лимит 429 через ретрай вместо тихой потери.
+
+## Требования
 
 - Python 3.11+
-- A Telegram **Premium** account (Business features require it)
-- A bot token from [@BotFather](https://t.me/BotFather)
-  - In BotFather: `/mybots â Bot Settings â Business Mode â Enable`
+- Аккаунт с **Telegram Premium** (Business-функции требуют его)
+- Токен бота от [@BotFather](https://t.me/BotFather)
+  - В BotFather: `/mybots → Bot Settings → Business Mode → Enable`
 
-## Install
+## Установка
 
 ```bash
 git clone <your-fork-url> ghost-recovery-bot
 cd ghost-recovery-bot
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-# put your BOT_TOKEN inside .env
+cp .env.example .env        # вписать BOT_TOKEN
 python main.py
 ```
 
-## Connect the bot to your account
+## Подключение к аккаунту
 
-1. Telegram â **Settings** â **Telegram Business** â **Chatbots**
-2. Type your bot's username and tap **Add**
-3. Allow it to read and manage messages
-4. The bot DMs you: `â ÐÐ¾Ñ Ð¿Ð¾Ð´ÐºÐ»ÑÑÑÐ½`
+1. Telegram → **Настройки** → **Telegram Business** → **Чат-боты**
+2. Введи username бота и добавь
+3. Разреши читать и управлять сообщениями
+4. Бот напишет тебе: `✅ Бот подключён`
 
-That's it. From now on, every deleted message in any of your chats will arrive in your DM with the bot.
+## Команды
 
-## Selfâdestruct media
-
-If someone sends a oneâview photo/video, **either**:
-
-- reply to it with any character (`+`, `.`, anything), or
-- put any reaction (â¤ï¸, ð, anything) on it.
-
-The bot will resend the cached copy to your DM.
-
-## Commands
-
-| Command | What it does |
+| Команда | Что делает |
 |---|---|
-| `/start` | Help screen |
-| `/status` | Connection status + how many messages cached |
-| `/wipe` | Delete everything the bot stored for you |
+| `/start`, `/help` | справка и подключение |
+| `/status` | статус + сколько сообщений в кэше |
+| `/wipe` | стереть всё, что бот сохранил для тебя |
+| `.mute 30m` / `.unmute` | временно глушить собеседника (писать **в самом чате**) |
 
-## Security & privacy
+`.mute` понимает `30s`, `5m`, `2h`, `1д`; без аргумента — бессрочно. Сама
+команда тут же удаляется из чата, собеседник её не видит.
 
-- Token lives in `.env` (gitignored)
-- Database is local; only the connection owner can read their messages
-- `business_connection_id â owner_id` mapping enforces isolation
-- No webhooks, no external services, only Telegram's API
-- For production: run behind systemd or Docker, restrict file permissions on `data.db`
+## Настройка поведения (.env)
 
-## Deploy with systemd (optional)
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `WEBHOOK_URL` | — | если задан — webhook-режим (Railway), иначе polling |
+| `DB_PATH` | `data.db` / `/data/ghost.db` | путь к базе |
+| `MEMORY_CACHE_SIZE` | `5000` | размер горячего кэша против гонки |
+| `RECALL_RETRIES` / `RECALL_RETRY_DELAY` | `6` / `0.4` | ретраи поиска при удалении |
+| `SEND_RETRIES` | `4` | ретраи отправки при флуд-лимите |
+| `SUPPORT_CONTACT` | `@qstaeg` | контакт в /start и /help |
 
-```ini
-# /etc/systemd/system/ghostbot.service
-[Unit]
-Description=Ghost Recovery Bot
-After=network.target
+## Приватность
 
-[Service]
-WorkingDirectory=/opt/ghostbot
-ExecStart=/opt/ghostbot/.venv/bin/python main.py
-Restart=always
-User=ghostbot
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable --now ghostbot
-```
+- Токен в `.env` (gitignored), база локальная
+- `business_connection_id → owner_id` гарантирует, что пользователи не видят чужое
+- Только Telegram API, никаких внешних сервисов
 
 ## License
 
-MIT â do whatever you want, just don't blame the author.
+MIT.
