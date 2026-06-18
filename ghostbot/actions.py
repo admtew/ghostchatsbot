@@ -19,6 +19,10 @@ self_deleted: set[tuple[str, int, int]] = set()
 # AFK auto-reply state, per connection: conn_id -> {"reason": str, "seen": set[chat_id]}
 afk: dict[str, dict] = {}
 
+# Disappearing-media messages we've already rescued, so a second reply to the
+# same message doesn't spam the owner. Keys: (conn_id, chat_id, message_id).
+rescued: set[tuple[str, int, int]] = set()
+
 
 async def delete_msgs(
     bot: Bot,

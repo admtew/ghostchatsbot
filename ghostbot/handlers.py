@@ -22,22 +22,28 @@ from aiogram.types import (
     Message,
 )
 
-from .actions import afk, delete_msgs, self_deleted
-from .commands import dispatch
+from .actions import afk, delete_msgs, rescued, self_deleted
+from .commands import _angrify, _kindify, dispatch
 from .config import RECALL_RETRIES, RECALL_RETRY_DELAY, SUPPORT_CONTACT, log
 from .formatting import chat_title as build_chat_title
 from .formatting import classify
-from .sender import forward_deleted, forward_edited
+from .sender import forward_deleted, forward_edited, send_recovered
 from .storage import (
+    banwords_on,
     count_for_owner,
+    get_style,
     mute_until,
     owner_of,
     recall,
     recall_batch,
     remember,
     save_connection,
+    text_has_banword,
     wipe_owner,
 )
+
+# Media kinds worth rescuing when the owner replies to a (possibly one-view) message.
+_RESCUE_KINDS = {"photo", "video", "voice", "video_note", "animation"}
 
 router = Router(name="ghost")
 
@@ -101,39 +107,88 @@ async def on_connect(bc: BusinessConnection, bot: Bot) -> None:
         log.warning("notify on connect failed: %s", e)
 
 
+async def _maybe_rescue(bot: Bot, conn_id: str, msg: Message, owner: int) -> None:
+    """If the owner replied to a contact's media message, resend a copy to DM.
+
+    This powers the "reply to a one-view file to save it" flow: the owner swipes
+    to reply (without opening) and writes anything; we deliver the cached media.
+    """
+    replied = msg.reply_to_message
+    if not replied:
+        return
+    key = (conn_id, msg.chat.id, replied.message_id)
+    if key in rescued:
+        return
+    data = recall(conn_id, msg.chat.id, replied.message_id)
+    if not data or data.get("sender_id") == owner:
+        return
+    if data.get("kind") not in _RESCUE_KINDS:
+        return
+    rescued.add(key)
+    await send_recovered(bot, owner, data, "⌛️ <b>Исчезающее медиа</b>")
+
+
 @router.business_message()
 async def on_business_message(msg: Message, bot: Bot) -> None:
     conn_id = msg.business_connection_id or ""
     owner = await ensure_connection(bot, conn_id)
     sender_id = msg.from_user.id if msg.from_user else None
 
-    # --- Owner actions ----------------------------------------------------
+    # --- Owner branch -----------------------------------------------------
     if owner and sender_id == owner:
         text = msg.text or ""
         if text.startswith(".") and await dispatch(bot, msg, conn_id, owner):
             return  # it was an in-chat command
-        # Any normal message from the owner cancels AFK.
+
+        # Reply to a (possibly disappearing) media → rescue it.
+        if msg.reply_to_message:
+            await _maybe_rescue(bot, conn_id, msg, owner)
+
+        # Any normal message cancels AFK.
         if conn_id in afk:
             afk.pop(conn_id, None)
             await _notify(bot, owner, "☀️ AFK снят — ты снова в сети.")
 
-    # --- Mute: drop the contact's message silently ------------------------
-    if owner and sender_id != owner and _is_muted(conn_id, msg.chat.id):
-        await delete_msgs(bot, conn_id, msg.chat.id, [msg.message_id])
-        log.info("mute: deleted msg=%s in chat=%s", msg.message_id, msg.chat.id)
-        return
-
-    # --- AFK: auto-reply once per chat ------------------------------------
-    if owner and sender_id != owner and conn_id in afk:
-        state = afk[conn_id]
-        if msg.chat.id not in state["seen"]:
-            state["seen"].add(msg.chat.id)
+        # Rewrite outgoing text in the active style (ang / kind).
+        style = get_style(conn_id)
+        if style and msg.text and not text.startswith("."):
+            new_text = _angrify(msg.text) if style == "ang" else _kindify(msg.text)
             try:
-                await bot.send_message(
-                    msg.chat.id, state["reason"], business_connection_id=conn_id
+                await bot.edit_message_text(
+                    new_text, business_connection_id=conn_id,
+                    chat_id=msg.chat.id, message_id=msg.message_id,
                 )
             except Exception as e:
-                log.warning("afk auto-reply failed: %s", e)
+                log.warning("style rewrite failed: %s", e)
+
+        remember(msg)
+        return
+
+    # --- Contact branch ---------------------------------------------------
+    if owner:
+        # Mute: drop the contact's message silently.
+        if _is_muted(conn_id, msg.chat.id):
+            await delete_msgs(bot, conn_id, msg.chat.id, [msg.message_id])
+            log.info("mute: deleted msg=%s in chat=%s", msg.message_id, msg.chat.id)
+            return
+
+        # Ban words: delete messages containing forbidden words.
+        if banwords_on(conn_id) and text_has_banword(owner, msg.text or ""):
+            await delete_msgs(bot, conn_id, msg.chat.id, [msg.message_id])
+            log.info("banword: deleted msg=%s in chat=%s", msg.message_id, msg.chat.id)
+            return
+
+        # AFK: auto-reply once per chat.
+        if conn_id in afk:
+            state = afk[conn_id]
+            if msg.chat.id not in state["seen"]:
+                state["seen"].add(msg.chat.id)
+                try:
+                    await bot.send_message(
+                        msg.chat.id, state["reason"], business_connection_id=conn_id
+                    )
+                except Exception as e:
+                    log.warning("afk auto-reply failed: %s", e)
 
     remember(msg)
     kind, file_id, _ = classify(msg)
@@ -219,7 +274,8 @@ async def cmd_start(msg: Message) -> None:
         "👻 <b>Одноразовое медиа</b> — сохраню до того, как исчезнет\n\n"
         "⚡️ <b>Команды прямо в чате</b> с собеседником (он их не видит):\n"
         "<code>.type</code>, <code>.bomb</code>, <code>.mock</code>, <code>.8ball</code>, "
-        "<code>.calc</code>, <code>.afk</code>, <code>.del</code>, <code>.edit</code>…\n"
+        "<code>.ang</code>/<code>.kind</code>, <code>.bw</code>, <code>.afk</code>…\n"
+        "⌛️ Реплай на одноразовое медиа (не открывая) — сохраню копию.\n"
         "Полный список — набери <code>.help</code> в любом диалоге.\n\n"
         "🔒 <b>Приватность:</b> данные только твои.\n\n"
         f"Вопросы → {SUPPORT_CONTACT}\n\n"

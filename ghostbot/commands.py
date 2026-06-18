@@ -15,9 +15,8 @@ That's it — it shows up in ``.help`` automatically.
 
 from __future__ import annotations
 
-import ast
 import asyncio
-import operator
+import hashlib
 import random
 import re
 import time
@@ -29,7 +28,16 @@ from aiogram.types import Message
 
 from .actions import afk, delete_msgs
 from .config import log
-from .storage import clear_mute, set_mute
+from .formatting import safe
+from .storage import (
+    add_ban_word,
+    clear_mute,
+    del_ban_word,
+    list_ban_words,
+    set_banwords,
+    set_mute,
+    set_style,
+)
 
 # ============================ Registry ============================
 
@@ -138,11 +146,80 @@ _FLIP = str.maketrans(
 )
 
 _8BALL = [
-    "Бесспорно", "Можешь не сомневаться", "Да", "Скорее всего",
-    "Хорошие перспективы", "Знаки говорят — да", "Пока не ясно, попробуй ещё",
-    "Спроси позже", "Не сейчас", "Даже не думай", "Мой ответ — нет",
-    "Очень сомнительно", "Никаких шансов",
+    # да
+    "да, и не еби мозги",
+    "конечно да, хули нет",
+    "блять ну разумеется да",
+    "100% да, мамой клянусь",
+    "да, звёзды сказали го",
+    "ну а то, ясен пень да",
+    "однозначно да 💯",
+    "да, делай уже не тупи",
+    "да, сам бог велел",
+    "да, но потом не ной",
+    "айда, чё ты как не родной",
+    # нет
+    "нет нахуй",
+    "нет блять, ты совсем ебанулся?",
+    "ни за что, даже не мечтай",
+    "нет, и точка",
+    "абсолютно нет, дурка по тебе плачет",
+    "нет, звёзды ржут с тебя",
+    "не, забей короче",
+    "нет, это днище-идея",
+    "лучше не надо, чувак",
+    "нет, я серьёзно, остынь",
+    # нейтрально / угар
+    "я бы не стал, но ты дурак — давай",
+    "хз честно, спроси у мамы",
+    "50 на 50, кидай монетку",
+    "шар думает... шар устал, отъебись",
+    "может да, может нет, может дождик может снег",
+    "сегодня не твой день, попробуй завтра",
+    "вселенная говорит «а пофиг, делай»",
+    "знаки говорят да, но знаки бухие",
+    "спроси позже, я обедаю",
+    "результат туманный, как твоё будущее",
+    "да... но это не точно",
+    "карма против, но когда тебя это останавливало",
 ]
+
+# --- Outgoing-message rewriting (rule-based, self-contained) ------------------
+_ANG_PREFIX = ["слушай сюда уебок,", "блять,", "эй дебил,", "ну чё,",
+               "сука,", "ало гандон,", "значит так,"]
+_ANG_INSERT = ["блять", "нахуй", "сука", "ёпта", "бля"]
+_ANG_SUFFIX = ["сука блять", "нахуй", "ёбаный в рот", "тварь",
+               "уебище", "пиздец", "понял да"]
+
+_KIND_PREFIX = ["Приветик", "Солнышко,", "Зайка,", "Дорогуша,", "Лапочка,", "Котик,"]
+_KIND_SUFFIX = ["обнимаю 🤗", "ты лучик 🌞", "люблю 💕", "хорошего дня 🌸",
+                "береги себя 🌷", "ты чудо ✨"]
+_KIND_EMOJI = ["🌸", "💕", "🥰", "✨", "🌷", "🤗", "😊", "🌞", "💗"]
+
+
+def _angrify(text: str) -> str:
+    words = text.split()
+    out: list[str] = []
+    for w in words:
+        out.append(w)
+        if random.random() < 0.3:
+            out.append(random.choice(_ANG_INSERT))
+    s = " ".join(out)
+    if random.random() < 0.7:
+        s = f"{random.choice(_ANG_PREFIX)} {s}"
+    if random.random() < 0.7:
+        s = f"{s} {random.choice(_ANG_SUFFIX)}"
+    return s
+
+
+def _kindify(text: str) -> str:
+    s = text
+    if random.random() < 0.7:
+        s = f"{random.choice(_KIND_PREFIX)} {s}"
+    s = f"{s} {random.choice(_KIND_EMOJI)}"
+    if random.random() < 0.6:
+        s = f"{s} {random.choice(_KIND_SUFFIX)}"
+    return s
 
 
 def _mock(text: str) -> str:
@@ -159,28 +236,6 @@ def _glitch(text: str) -> str:
     marks = "̧̖̗̀́̂̃̈҉"
     return "".join(ch + "".join(random.choice(marks) for _ in range(random.randint(1, 3)))
                     for ch in text)
-
-
-# ============================ Safe calculator ============================
-
-_OPS = {
-    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
-    ast.Div: operator.truediv, ast.Pow: operator.pow, ast.Mod: operator.mod,
-    ast.FloorDiv: operator.floordiv, ast.USub: operator.neg, ast.UAdd: operator.pos,
-}
-
-
-def _calc(expr: str) -> float:
-    def ev(node):
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return node.value
-        if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
-            return _OPS[type(node.op)](ev(node.left), ev(node.right))
-        if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
-            return _OPS[type(node.op)](ev(node.operand))
-        raise ValueError("недопустимое выражение")
-
-    return ev(ast.parse(expr, mode="eval").body)
 
 
 # ============================ Entertainment ============================
@@ -261,43 +316,109 @@ async def cmd_roll(ctx: Ctx) -> None:
     await ctx.send(f"🎲 {random.randint(1, max(top, 1))}")
 
 
-@command("choose", "pick", help="Выбрать вариант: .choose чай|кофе", category="Развлечения")
-async def cmd_choose(ctx: Ctx) -> None:
-    sep = "|" if "|" in ctx.arg else ","
-    options = [o.strip() for o in ctx.arg.split(sep) if o.strip()]
-    if options:
-        await ctx.send(f"👉 {random.choice(options)}")
+@command("coin", help="Орёл или решка", category="Развлечения")
+async def cmd_coin(ctx: Ctx) -> None:
+    await ctx.send(random.choice(["🦅 Орёл", "🪙 Решка"]))
+
+
+@command("love", help="Совместимость: .love Маша + Паша", category="Развлечения")
+async def cmd_love(ctx: Ctx) -> None:
+    names = ctx.arg.strip()
+    if not names:
+        await ctx.send("💘 Кого с кем? Напиши: .love Маша + Паша")
+        return
+    pct = int(hashlib.md5(names.lower().encode()).hexdigest(), 16) % 101
+    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+    verdict = ("идеальная пара 💍" if pct > 80 else "есть искра 🔥" if pct > 50
+               else "так себе 😬" if pct > 20 else "бегите друг от друга 🚪")
+    await ctx.send(f"💘 <b>{safe(names)}</b>\n{bar} {pct}%\n{verdict}")
+
+
+@command("tmp", help="Самоуничтожение: .tmp 10 текст", category="Развлечения")
+async def cmd_tmp(ctx: Ctx) -> None:
+    args = ctx.args
+    if not args or not args[0].isdigit():
+        return
+    sec = min(int(args[0]), 300)
+    text = ctx.arg.split(maxsplit=1)[1] if len(args) > 1 else "👻"
+    sent = await ctx.send(f"{text}\n\n<i>исчезнет через {sec}с</i>")
+    await asyncio.sleep(sec)
+    await ctx.delete(sent.message_id)
+
+
+# ============================ Modes ============================
+
+@command("ang", help="Злой режим: твои сообщения станут грубыми", category="Режимы")
+async def cmd_ang(ctx: Ctx) -> None:
+    set_style(ctx.conn_id, "ang")
+    await ctx.notify(
+        "😈 <b>Злой режим включён.</b> Твои сообщения буду переписывать грубо.\n"
+        "<code>.unang</code> — выключить."
+    )
+
+
+@command("unang", help="Выключить злой режим", category="Режимы")
+async def cmd_unang(ctx: Ctx) -> None:
+    set_style(ctx.conn_id, None)
+    await ctx.notify("😇 Злой режим выключен.")
+
+
+@command("kind", help="Добрый режим: мягко и со смайликами", category="Режимы")
+async def cmd_kind(ctx: Ctx) -> None:
+    set_style(ctx.conn_id, "kind")
+    await ctx.notify(
+        "🌸 <b>Добрый режим включён.</b> Твои сообщения станут милыми.\n"
+        "<code>.unkind</code> — выключить."
+    )
+
+
+@command("unkind", help="Выключить добрый режим", category="Режимы")
+async def cmd_unkind(ctx: Ctx) -> None:
+    set_style(ctx.conn_id, None)
+    await ctx.notify("🙂 Добрый режим выключен.")
+
+
+@command("bw", help="Бан-слова: .bw add спам / .bw list / .bw off", category="Режимы")
+async def cmd_bw(ctx: Ctx) -> None:
+    args = ctx.args
+    if not args:
+        set_banwords(ctx.conn_id, True)
+        await ctx.notify(
+            "🚫 <b>Бан-слова включены.</b> Сообщения собеседника с этими словами удаляю.\n"
+            "Добавить: <code>.bw add слово</code> · список: <code>.bw list</code> · "
+            "выкл: <code>.bw off</code>"
+        )
+        return
+    sub = args[0].lower()
+    rest = ctx.arg.split(maxsplit=1)[1].strip() if len(args) > 1 else ""
+    if sub == "add" and rest:
+        add_ban_word(ctx.owner, rest)
+        set_banwords(ctx.conn_id, True)
+        await ctx.notify(f"➕ В бан-слова добавлено: <code>{safe(rest)}</code>")
+    elif sub in ("del", "rm", "remove") and rest:
+        del_ban_word(ctx.owner, rest)
+        await ctx.notify(f"➖ Убрано из бан-слов: <code>{safe(rest)}</code>")
+    elif sub == "list":
+        words = list_ban_words(ctx.owner)
+        body = ", ".join(safe(w) for w in words) if words else "—"
+        await ctx.notify(f"🚫 <b>Бан-слова:</b>\n{body}")
+    elif sub == "on":
+        set_banwords(ctx.conn_id, True)
+        await ctx.notify("🚫 Бан-слова включены.")
+    elif sub == "off":
+        set_banwords(ctx.conn_id, False)
+        await ctx.notify("✅ Бан-слова выключены.")
+    else:
+        await ctx.notify("Использование: <code>.bw add|del|list|on|off</code>")
+
+
+@command("unbw", help="Выключить бан-слова", category="Режимы")
+async def cmd_unbw(ctx: Ctx) -> None:
+    set_banwords(ctx.conn_id, False)
+    await ctx.notify("✅ Бан-слова выключены.")
 
 
 # ============================ Utility ============================
-
-@command("del", "d", help="Удалить сообщение (ответом на него)", category="Полезное")
-async def cmd_del(ctx: Ctx) -> None:
-    if ctx.reply:
-        await ctx.delete(ctx.reply.message_id)
-
-
-@command("edit", "e", help="Изменить своё сообщение (ответом): .edit новый текст", category="Полезное")
-async def cmd_edit(ctx: Ctx) -> None:
-    if ctx.reply and ctx.arg:
-        try:
-            await ctx.edit(ctx.reply.message_id, ctx.arg)
-        except Exception as e:
-            await ctx.notify(f"⚠️ Не вышло изменить: {e}")
-
-
-@command("calc", "c", help="Калькулятор: .calc 2+2*3", category="Полезное")
-async def cmd_calc(ctx: Ctx) -> None:
-    if not ctx.arg:
-        return
-    try:
-        result = _calc(ctx.arg)
-        if isinstance(result, float) and result.is_integer():
-            result = int(result)
-        await ctx.send(f"{ctx.arg} = {result}")
-    except Exception:
-        await ctx.notify("⚠️ Не смог посчитать выражение.")
-
 
 @command("afk", help="Автоответ пока тебя нет: .afk обедаю", category="Полезное")
 async def cmd_afk(ctx: Ctx) -> None:

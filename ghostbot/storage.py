@@ -83,6 +83,16 @@ def init_db() -> None:
             until    INTEGER,
             PRIMARY KEY (conn_id, chat_id)
         );
+        CREATE TABLE IF NOT EXISTS modes (
+            conn_id  TEXT PRIMARY KEY,
+            style    TEXT,                       -- 'ang' | 'kind' | NULL
+            banwords INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS ban_words (
+            owner_id INTEGER NOT NULL,
+            word     TEXT    NOT NULL,
+            PRIMARY KEY (owner_id, word)
+        );
         """
     )
     # Lightweight migration for databases created by older versions.
@@ -294,3 +304,62 @@ def mute_until(conn_id: str, chat_id: int) -> int | None | bool:
         clear_mute(conn_id, chat_id)
         return False
     return until
+
+
+# ============================ Modes (ang / kind / banwords) ============================
+
+def set_style(conn_id: str, style: str | None) -> None:
+    """Set the outgoing rewrite style for a connection: 'ang', 'kind' or None."""
+    get_db().execute(
+        """INSERT INTO modes(conn_id, style) VALUES(?,?)
+           ON CONFLICT(conn_id) DO UPDATE SET style = excluded.style""",
+        (conn_id, style),
+    )
+
+
+def get_style(conn_id: str) -> str | None:
+    row = get_db().execute(
+        "SELECT style FROM modes WHERE conn_id=?", (conn_id,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def set_banwords(conn_id: str, on: bool) -> None:
+    get_db().execute(
+        """INSERT INTO modes(conn_id, banwords) VALUES(?,?)
+           ON CONFLICT(conn_id) DO UPDATE SET banwords = excluded.banwords""",
+        (conn_id, 1 if on else 0),
+    )
+
+
+def banwords_on(conn_id: str) -> bool:
+    row = get_db().execute(
+        "SELECT banwords FROM modes WHERE conn_id=?", (conn_id,)
+    ).fetchone()
+    return bool(row[0]) if row else False
+
+
+def add_ban_word(owner_id: int, word: str) -> None:
+    get_db().execute(
+        "INSERT OR IGNORE INTO ban_words(owner_id, word) VALUES(?,?)",
+        (owner_id, word.lower()),
+    )
+
+
+def del_ban_word(owner_id: int, word: str) -> None:
+    get_db().execute(
+        "DELETE FROM ban_words WHERE owner_id=? AND word=?", (owner_id, word.lower())
+    )
+
+
+def list_ban_words(owner_id: int) -> list[str]:
+    return [r[0] for r in get_db().execute(
+        "SELECT word FROM ban_words WHERE owner_id=? ORDER BY word", (owner_id,)
+    ).fetchall()]
+
+
+def text_has_banword(owner_id: int, text: str) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    return any(w in low for w in list_ban_words(owner_id))
