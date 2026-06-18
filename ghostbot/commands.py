@@ -30,12 +30,14 @@ from datetime import datetime, timedelta, timezone
 from .actions import afk, delete_msgs, mark_sent
 from .config import TZ_OFFSET, log
 from .formatting import safe
+from .sender import send_recovered
 from .storage import (
     add_ban_word,
     add_reminder,
     clear_mute,
     del_ban_word,
     list_ban_words,
+    recall,
     set_banwords,
     set_mute,
     set_style,
@@ -215,11 +217,10 @@ def _angrify(text: str) -> str:
         if random.random() < 0.3:
             out.append(random.choice(_ANG_INSERT))
     s = " ".join(out)
-    if random.random() < 0.7:
+    if random.random() < 0.6:
         s = f"{random.choice(_ANG_PREFIX)} {s}"
-    if random.random() < 0.7:
-        s = f"{s} {random.choice(_ANG_SUFFIX)}"
-    return s
+    # Always append a suffix so the message is guaranteed to change.
+    return f"{s} {random.choice(_ANG_SUFFIX)}"
 
 
 def _kindify(text: str) -> str:
@@ -524,6 +525,27 @@ async def cmd_remind(ctx: Ctx) -> None:
     add_reminder(ctx.owner, ctx.conn_id, ctx.chat_id, due, parts[1])
     when = datetime.fromtimestamp(due, timezone(timedelta(hours=TZ_OFFSET))).strftime("%d.%m %H:%M")
     await ctx.notify(f"⏰ Напомню <b>{when}</b>:\n{safe(parts[1])}")
+
+
+@command("save", "сохр", "сейв", help="Сохранить медиа: ответь этой командой на фото/видео/гс",
+         category="Полезное")
+async def cmd_save(ctx: Ctx) -> None:
+    replied = ctx.reply
+    if not replied:
+        await ctx.notify(
+            "💾 Ответь командой <code>.save</code> на одноразовое фото/видео/голосовое — "
+            "пришлю копию в лс."
+        )
+        return
+    data = recall(ctx.conn_id, ctx.chat_id, replied.message_id)
+    if not data:
+        await ctx.notify(
+            "💾 Этого медиа нет в кэше. Скорее всего, у бота нет доступа к этому чату — "
+            "переподключи его в <b>Telegram Business → Чат-боты</b> с доступом ко "
+            "<b>всем чатам</b> и правом управлять сообщениями."
+        )
+        return
+    await send_recovered(ctx.bot, ctx.owner, data, "💾 <b>Сохранённое медиа</b>")
 
 
 @command("table", "tbl", help="Таблица: .table, дальше строки, колонки через |",

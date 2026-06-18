@@ -22,7 +22,15 @@ from aiogram.types import (
     Message,
 )
 
-from .actions import afk, bot_sent, delete_msgs, rescued, self_deleted, send_as_owner
+from .actions import (
+    afk,
+    bot_sent,
+    delete_msgs,
+    rescued,
+    self_deleted,
+    send_as_owner,
+    was_sent_text,
+)
 from .commands import _angrify, _kindify, dispatch
 from .config import RECALL_RETRIES, RECALL_RETRY_DELAY, SUPPORT_CONTACT, log
 from .formatting import chat_title as build_chat_title
@@ -160,6 +168,9 @@ async def on_business_message(msg: Message, bot: Bot) -> None:
         # reliable, so we replace it instead.)
         style = get_style(conn_id)
         if style and msg.text and not text.startswith("."):
+            # Skip the echo of a message we just sent (prevents a rewrite loop).
+            if was_sent_text(conn_id, msg.text):
+                return
             new_text = _angrify(msg.text) if style == "ang" else _kindify(msg.text)
             await delete_msgs(bot, conn_id, msg.chat.id, [msg.message_id])
             try:
