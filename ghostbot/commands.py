@@ -125,10 +125,16 @@ async def dispatch(bot: Bot, msg: Message, conn_id: str, owner: int) -> bool:
     text = (msg.text or "").strip()
     if not text.startswith("."):
         return False
-    head, _, rest = text[1:].partition(" ")
-    cmd = COMMANDS.get(head.lower())
+    # Split off the command word on the first whitespace (space OR newline), so
+    # multi-line commands like .table work: ".table\nA | B\nC | D".
+    parts = text[1:].split(maxsplit=1)
+    if not parts:
+        return False
+    head = parts[0].lower()
+    cmd = COMMANDS.get(head)
     if not cmd:
         return False
+    rest = parts[1] if len(parts) > 1 else ""
 
     # Hide the command from the contact before doing anything else.
     await delete_msgs(bot, conn_id, msg.chat.id, [msg.message_id])
@@ -240,6 +246,32 @@ def _glitch(text: str) -> str:
     marks = "̧̖̗̀́̂̃̈҉"
     return "".join(ch + "".join(random.choice(marks) for _ in range(random.randint(1, 3)))
                     for ch in text)
+
+
+def _render_table(arg: str) -> str | None:
+    """Build a monospace bordered table from rows (newline or ';') × cells ('|').
+
+    Returns an HTML <pre> block, or None if there's nothing to render.
+    """
+    raw_rows = [r for r in re.split(r"[\n;]", arg) if r.strip()]
+    if not raw_rows:
+        return None
+    rows = [[c.strip()[:40] for c in r.split("|")] for r in raw_rows][:20]
+    ncols = min(max(len(r) for r in rows), 6)
+    rows = [(r + [""] * ncols)[:ncols] for r in rows]
+    widths = [max(len(r[i]) for r in rows) for i in range(ncols)]
+
+    def hline(left: str, mid: str, right: str) -> str:
+        return left + mid.join("─" * (w + 2) for w in widths) + right
+
+    def line(cells: list[str]) -> str:
+        return "│" + "│".join(f" {c.ljust(w)} " for c, w in zip(cells, widths)) + "│"
+
+    out = [hline("┌", "┬", "┐")]
+    for i, r in enumerate(rows):
+        out.append(line(r))
+        out.append(hline("├", "┼", "┤") if i < len(rows) - 1 else hline("└", "┴", "┘"))
+    return f"<pre>{safe(chr(10).join(out))}</pre>"
 
 
 # ============================ Entertainment ============================
@@ -492,6 +524,22 @@ async def cmd_remind(ctx: Ctx) -> None:
     add_reminder(ctx.owner, ctx.conn_id, ctx.chat_id, due, parts[1])
     when = datetime.fromtimestamp(due, timezone(timedelta(hours=TZ_OFFSET))).strftime("%d.%m %H:%M")
     await ctx.notify(f"⏰ Напомню <b>{when}</b>:\n{safe(parts[1])}")
+
+
+@command("table", "tbl", help="Таблица: .table, дальше строки, колонки через |",
+         category="Полезное")
+async def cmd_table(ctx: Ctx) -> None:
+    table = _render_table(ctx.arg)
+    if not table:
+        await ctx.notify(
+            "📊 <b>Как сделать таблицу</b>\n"
+            "Пиши команду, дальше — строки с новой строки, колонки через <code>|</code>:\n\n"
+            "<pre>.table\nПриз | 500$\nБюджет | 3000-5000$\nДедлайн | 10 дней</pre>\n"
+            "Можно и в одну строку через <code>;</code>: "
+            "<code>.table Приз | 500$ ; Дедлайн | 10д</code>"
+        )
+        return
+    await ctx.send(table)
 
 
 @command("id", help="Показать id чата и собеседника", category="Полезное")
