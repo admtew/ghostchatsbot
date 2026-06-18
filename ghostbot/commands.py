@@ -16,7 +16,6 @@ That's it — it shows up in ``.help`` automatically.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import random
 import re
 import time
@@ -26,7 +25,7 @@ from typing import Awaitable, Callable
 from aiogram import Bot
 from aiogram.types import Message
 
-from .actions import afk, delete_msgs
+from .actions import afk, delete_msgs, mark_sent
 from .config import log
 from .formatting import safe
 from .storage import (
@@ -66,9 +65,11 @@ class Ctx:
 
     async def send(self, text: str, **kw) -> Message:
         """Send a message into the chat as the owner."""
-        return await self.bot.send_message(
+        m = await self.bot.send_message(
             self.chat_id, text, business_connection_id=self.conn_id, **kw
         )
+        mark_sent(self.conn_id, self.chat_id, m.message_id)
+        return m
 
     async def edit(self, message_id: int, text: str, **kw) -> None:
         await self.bot.edit_message_text(
@@ -319,31 +320,6 @@ async def cmd_roll(ctx: Ctx) -> None:
 @command("coin", help="Орёл или решка", category="Развлечения")
 async def cmd_coin(ctx: Ctx) -> None:
     await ctx.send(random.choice(["🦅 Орёл", "🪙 Решка"]))
-
-
-@command("love", help="Совместимость: .love Маша + Паша", category="Развлечения")
-async def cmd_love(ctx: Ctx) -> None:
-    names = ctx.arg.strip()
-    if not names:
-        await ctx.send("💘 Кого с кем? Напиши: .love Маша + Паша")
-        return
-    pct = int(hashlib.md5(names.lower().encode()).hexdigest(), 16) % 101
-    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-    verdict = ("идеальная пара 💍" if pct > 80 else "есть искра 🔥" if pct > 50
-               else "так себе 😬" if pct > 20 else "бегите друг от друга 🚪")
-    await ctx.send(f"💘 <b>{safe(names)}</b>\n{bar} {pct}%\n{verdict}")
-
-
-@command("tmp", help="Самоуничтожение: .tmp 10 текст", category="Развлечения")
-async def cmd_tmp(ctx: Ctx) -> None:
-    args = ctx.args
-    if not args or not args[0].isdigit():
-        return
-    sec = min(int(args[0]), 300)
-    text = ctx.arg.split(maxsplit=1)[1] if len(args) > 1 else "👻"
-    sent = await ctx.send(f"{text}\n\n<i>исчезнет через {sec}с</i>")
-    await asyncio.sleep(sec)
-    await ctx.delete(sent.message_id)
 
 
 # ============================ Modes ============================

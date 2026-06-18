@@ -23,6 +23,24 @@ afk: dict[str, dict] = {}
 # same message doesn't spam the owner. Keys: (conn_id, chat_id, message_id).
 rescued: set[tuple[str, int, int]] = set()
 
+# Messages the bot itself sent into a chat (commands, style rewrites, AFK).
+# Telegram echoes them back as business_message updates; we skip those so they
+# aren't re-processed (which would loop style rewriting) or stored as the owner.
+bot_sent: set[tuple[str, int, int]] = set()
+
+
+def mark_sent(conn_id: str, chat_id: int, message_id: int) -> None:
+    bot_sent.add((conn_id, chat_id, message_id))
+    if len(bot_sent) > 3000:
+        bot_sent.pop()
+
+
+async def send_as_owner(bot: Bot, conn_id: str, chat_id: int, text: str, **kw):
+    """Send a message into a chat as the owner, remembering its id to ignore the echo."""
+    m = await bot.send_message(chat_id, text, business_connection_id=conn_id, **kw)
+    mark_sent(conn_id, chat_id, m.message_id)
+    return m
+
 
 async def delete_msgs(
     bot: Bot,

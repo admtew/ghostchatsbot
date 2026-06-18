@@ -22,7 +22,7 @@ from aiogram.types import (
     Message,
 )
 
-from .actions import afk, delete_msgs, rescued, self_deleted
+from .actions import afk, bot_sent, delete_msgs, rescued, self_deleted, send_as_owner
 from .commands import _angrify, _kindify, dispatch
 from .config import RECALL_RETRIES, RECALL_RETRY_DELAY, SUPPORT_CONTACT, log
 from .formatting import chat_title as build_chat_title
@@ -134,6 +134,12 @@ async def on_business_message(msg: Message, bot: Bot) -> None:
     owner = await ensure_connection(bot, conn_id)
     sender_id = msg.from_user.id if msg.from_user else None
 
+    # Ignore the echo of messages the bot itself just sent into the chat.
+    echo_key = (conn_id, msg.chat.id, msg.message_id)
+    if echo_key in bot_sent:
+        bot_sent.discard(echo_key)
+        return
+
     # --- Owner branch -----------------------------------------------------
     if owner and sender_id == owner:
         text = msg.text or ""
@@ -149,17 +155,18 @@ async def on_business_message(msg: Message, bot: Bot) -> None:
             afk.pop(conn_id, None)
             await _notify(bot, owner, "☀️ AFK снят — ты снова в сети.")
 
-        # Rewrite outgoing text in the active style (ang / kind).
+        # Style rewrite: delete the original and resend it rewritten as the
+        # owner. (Editing a user's own message over a business connection isn't
+        # reliable, so we replace it instead.)
         style = get_style(conn_id)
         if style and msg.text and not text.startswith("."):
             new_text = _angrify(msg.text) if style == "ang" else _kindify(msg.text)
+            await delete_msgs(bot, conn_id, msg.chat.id, [msg.message_id])
             try:
-                await bot.edit_message_text(
-                    new_text, business_connection_id=conn_id,
-                    chat_id=msg.chat.id, message_id=msg.message_id,
-                )
+                await send_as_owner(bot, conn_id, msg.chat.id, new_text)
             except Exception as e:
-                log.warning("style rewrite failed: %s", e)
+                log.warning("style resend failed: %s", e)
+            return
 
         remember(msg)
         return
@@ -184,9 +191,7 @@ async def on_business_message(msg: Message, bot: Bot) -> None:
             if msg.chat.id not in state["seen"]:
                 state["seen"].add(msg.chat.id)
                 try:
-                    await bot.send_message(
-                        msg.chat.id, state["reason"], business_connection_id=conn_id
-                    )
+                    await send_as_owner(bot, conn_id, msg.chat.id, state["reason"])
                 except Exception as e:
                     log.warning("afk auto-reply failed: %s", e)
 
