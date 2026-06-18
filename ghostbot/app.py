@@ -17,8 +17,26 @@ from .config import (
     WEBHOOK_URL,
     log,
 )
+from .formatting import safe
 from .handlers import router
-from .storage import init_db
+from .storage import delete_reminder, due_reminders, init_db
+
+
+async def _reminder_loop(bot: Bot) -> None:
+    """Background task: deliver due reminders to their owners every ~20s."""
+    import time
+
+    while True:
+        try:
+            for rid, owner, text in due_reminders(int(time.time())):
+                try:
+                    await bot.send_message(owner, f"⏰ <b>Напоминание</b>\n\n{safe(text)}")
+                except Exception as e:
+                    log.warning("reminder %s send failed: %s", rid, e)
+                delete_reminder(rid)
+        except Exception as e:
+            log.warning("reminder loop error: %s", e)
+        await asyncio.sleep(20)
 
 
 def build_bot() -> Bot:
@@ -41,6 +59,9 @@ async def run() -> None:
 
     bot = build_bot()
     dp = build_dispatcher()
+
+    # Background scheduler for reminders.
+    asyncio.create_task(_reminder_loop(bot))
 
     app = web.Application()
 

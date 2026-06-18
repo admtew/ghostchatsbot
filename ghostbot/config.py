@@ -45,6 +45,10 @@ RECALL_RETRY_DELAY: float = float(os.getenv("RECALL_RETRY_DELAY", "0.4"))  # sec
 # How many resends to flush at once when a whole batch is deleted.
 BATCH_DISPLAY_LIMIT: int = int(os.getenv("BATCH_DISPLAY_LIMIT", "30"))
 
+# Timezone offset (hours from UTC) for clock-time reminders like ".remind 18:00".
+# Duration reminders (".remind 30m") don't need this. Railway runs in UTC.
+TZ_OFFSET: int = int(os.getenv("TZ_OFFSET", "0"))
+
 # Retries for outgoing sends that hit Telegram flood limits (429).
 SEND_RETRIES: int = int(os.getenv("SEND_RETRIES", "4"))
 

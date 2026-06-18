@@ -93,6 +93,16 @@ def init_db() -> None:
             word     TEXT    NOT NULL,
             PRIMARY KEY (owner_id, word)
         );
+        CREATE TABLE IF NOT EXISTS reminders (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_id   INTEGER NOT NULL,
+            conn_id    TEXT,
+            chat_id    INTEGER,
+            due_ts     INTEGER NOT NULL,
+            text       TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_ts);
         """
     )
     # Lightweight migration for databases created by older versions.
@@ -363,3 +373,35 @@ def text_has_banword(owner_id: int, text: str) -> bool:
         return False
     low = text.lower()
     return any(w in low for w in list_ban_words(owner_id))
+
+
+# ============================ Reminders ============================
+
+def add_reminder(owner_id: int, conn_id: str, chat_id: int, due_ts: int, text: str) -> None:
+    get_db().execute(
+        """INSERT INTO reminders(owner_id, conn_id, chat_id, due_ts, text, created_at)
+           VALUES(?,?,?,?,?,?)""",
+        (owner_id, conn_id, chat_id, due_ts, text, now_iso()),
+    )
+
+
+def due_reminders(now_ts: int) -> list[tuple[int, int, str]]:
+    """Return (id, owner_id, text) for reminders whose time has come."""
+    return [
+        (r[0], r[1], r[2])
+        for r in get_db().execute(
+            "SELECT id, owner_id, text FROM reminders WHERE due_ts <= ? ORDER BY due_ts",
+            (now_ts,),
+        ).fetchall()
+    ]
+
+
+def delete_reminder(reminder_id: int) -> None:
+    get_db().execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
+
+
+def count_reminders(owner_id: int) -> int:
+    row = get_db().execute(
+        "SELECT COUNT(*) FROM reminders WHERE owner_id=?", (owner_id,)
+    ).fetchone()
+    return row[0] if row else 0

@@ -25,11 +25,14 @@ from typing import Awaitable, Callable
 from aiogram import Bot
 from aiogram.types import Message
 
+from datetime import datetime, timedelta, timezone
+
 from .actions import afk, delete_msgs, mark_sent
-from .config import log
+from .config import TZ_OFFSET, log
 from .formatting import safe
 from .storage import (
     add_ban_word,
+    add_reminder,
     clear_mute,
     del_ban_word,
     list_ban_words,
@@ -456,6 +459,39 @@ async def cmd_mute(ctx: Ctx) -> None:
 async def cmd_unmute(ctx: Ctx) -> None:
     clear_mute(ctx.conn_id, ctx.chat_id)
     await ctx.notify("🔊 <b>Чат разглушён.</b> Сообщения снова приходят.")
+
+
+def _parse_when(s: str) -> int | None:
+    """'30m' / '2h' / '1d' → unix-ts; 'HH:MM' → next such time (in TZ_OFFSET)."""
+    secs = _parse_duration(s)
+    if secs:
+        return int(time.time()) + secs
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", s)
+    if m:
+        tz = timezone(timedelta(hours=TZ_OFFSET))
+        now = datetime.now(tz)
+        target = now.replace(hour=int(m.group(1)), minute=int(m.group(2)),
+                             second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return int(target.timestamp())
+    return None
+
+
+@command("remind", "rem", help="Напоминание: .remind 30m текст / .remind 18:00 текст",
+         category="Полезное")
+async def cmd_remind(ctx: Ctx) -> None:
+    parts = ctx.arg.split(maxsplit=1)
+    if len(parts) < 2:
+        await ctx.notify("⏰ Формат: <code>.remind 30m текст</code> или <code>.remind 18:00 текст</code>")
+        return
+    due = _parse_when(parts[0])
+    if not due:
+        await ctx.notify("⏰ Не понял время. Примеры: 30m, 2h, 1d, 18:00")
+        return
+    add_reminder(ctx.owner, ctx.conn_id, ctx.chat_id, due, parts[1])
+    when = datetime.fromtimestamp(due, timezone(timedelta(hours=TZ_OFFSET))).strftime("%d.%m %H:%M")
+    await ctx.notify(f"⏰ Напомню <b>{when}</b>:\n{safe(parts[1])}")
 
 
 @command("id", help="Показать id чата и собеседника", category="Полезное")
